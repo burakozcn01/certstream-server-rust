@@ -104,6 +104,7 @@ pub async fn run_watcher(
     let source = Arc::new(Source {
         name: Arc::from(log.description.as_str()),
         url: Arc::from(base_url.as_str()),
+        operator: Arc::from(log.operator.as_str()),
     });
 
     let health = Arc::new(LogHealth::new());

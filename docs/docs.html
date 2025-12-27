@@ -162,7 +162,7 @@
                     <h2>Message Format</h2>
                     <p>JSON structure for certificate update messages</p>
                 </div>
-                <div class="code-example" style="max-width: 800px;">
+                <div class="code-example" style="max-width: 900px;">
                     <div class="code-example-header">
                         <span class="lang">JSON</span>
                         <span class="tag">certificate_update</span>
@@ -174,29 +174,41 @@
     "<span class="str">leaf_cert</span>": {
       "<span class="str">subject</span>": {
         "<span class="str">CN</span>": "<span class="str">example.com</span>",
-        "<span class="str">O</span>": "<span class="str">Example Inc</span>"
+        "<span class="str">O</span>": "<span class="str">Example Inc</span>",
+        "<span class="str">C</span>": "<span class="str">US</span>",
+        "<span class="str">aggregated</span>": "<span class="str">/C=US/CN=example.com/O=Example Inc</span>"
       },
       "<span class="str">issuer</span>": {
         "<span class="str">CN</span>": "<span class="str">R3</span>",
-        "<span class="str">O</span>": "<span class="str">Let's Encrypt</span>"
+        "<span class="str">O</span>": "<span class="str">Let's Encrypt</span>",
+        "<span class="str">aggregated</span>": "<span class="str">/CN=R3/O=Let's Encrypt</span>"
       },
-      "<span class="str">serial_number</span>": "<span class="str">04:8A:3F:...</span>",
+      "<span class="str">serial_number</span>": "<span class="str">048A3F...</span>",
       "<span class="str">not_before</span>": <span class="var">1703721600</span>,
       "<span class="str">not_after</span>": <span class="var">1735257600</span>,
-      "<span class="str">fingerprint</span>": "<span class="str">SHA256:AB:CD:EF:...</span>",
+      "<span class="str">fingerprint</span>": "<span class="str">AB:CD:EF:01:...</span>",
+      "<span class="str">sha1</span>": "<span class="str">AB:CD:EF:01:...</span>",
+      "<span class="str">sha256</span>": "<span class="str">AB:CD:EF:01:...</span>",
+      "<span class="str">signature_algorithm</span>": "<span class="str">sha256, rsa</span>",
+      "<span class="str">is_ca</span>": <span class="var">false</span>,
       "<span class="str">all_domains</span>": [
         "<span class="str">example.com</span>",
-        "<span class="str">www.example.com</span>",
-        "<span class="str">mail.example.com</span>"
+        "<span class="str">www.example.com</span>"
       ],
+      "<span class="str">extensions</span>": {
+        "<span class="str">keyUsage</span>": "<span class="str">Digital Signature, Key Encipherment</span>",
+        "<span class="str">extendedKeyUsage</span>": "<span class="str">serverAuth, clientAuth</span>",
+        "<span class="str">basicConstraints</span>": "<span class="str">CA:FALSE</span>",
+        "<span class="str">subjectAltName</span>": "<span class="str">DNS:example.com, DNS:www.example.com</span>"
+      },
       "<span class="str">as_der</span>": "<span class="str">BASE64...</span>"  <span class="cm">// full-stream only</span>
     },
     "<span class="str">chain</span>": [...],  <span class="cm">// full-stream only</span>
     "<span class="str">cert_index</span>": <span class="var">1234567890</span>,
     "<span class="str">seen</span>": <span class="var">1703808000.123</span>,
     "<span class="str">source</span>": {
-      "<span class="str">url</span>": "<span class="str">ct.googleapis.com/logs/argon2024</span>",
-      "<span class="str">name</span>": "<span class="str">Google Argon 2024</span>"
+      "<span class="str">url</span>": "<span class="str">ct.googleapis.com/logs/argon2025</span>",
+      "<span class="str">name</span>": "<span class="str">Google Argon 2025</span>"
     }
   }
 }</pre>
@@ -764,7 +776,7 @@ docker compose up -d</pre>
                 <a href="https://github.com/burakozcn01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
                 <a href="https://github.com/burakozcn01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
             </div>
-            <p>certstream-server-rust v1.0.4</p>
+            <p>certstream-server-rust v1.0.5</p>
         </div>
     </footer>
 </body>

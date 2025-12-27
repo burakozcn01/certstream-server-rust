@@ -18,15 +18,14 @@ struct LogListResponse {
 
 #[derive(Debug, Deserialize)]
 struct Operator {
-    #[allow(dead_code)]
     name: String,
-    logs: Vec<CtLog>,
+    logs: Vec<RawCtLog>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct CtLog {
-    pub description: String,
-    pub url: String,
+#[derive(Debug, Deserialize)]
+struct RawCtLog {
+    description: String,
+    url: String,
     #[serde(default)]
     state: Option<LogState>,
 }
@@ -46,6 +45,14 @@ struct LogState {
 struct StateInfo {
     #[allow(dead_code)]
     timestamp: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CtLog {
+    pub description: String,
+    pub url: String,
+    pub operator: String,
+    state: Option<LogState>,
 }
 
 impl CtLog {
@@ -71,6 +78,7 @@ impl From<CustomCtLog> for CtLog {
         Self {
             description: custom.name,
             url: custom.url,
+            operator: "Custom".to_string(),
             state: None,
         }
     }
@@ -86,7 +94,15 @@ pub async fn fetch_log_list(
     let mut logs: Vec<CtLog> = response
         .operators
         .into_iter()
-        .flat_map(|op| op.logs)
+        .flat_map(|op| {
+            let operator_name = op.name;
+            op.logs.into_iter().map(move |log| CtLog {
+                description: log.description,
+                url: log.url,
+                operator: operator_name.clone(),
+                state: log.state,
+            })
+        })
         .filter(|log| log.is_usable())
         .collect();
 
