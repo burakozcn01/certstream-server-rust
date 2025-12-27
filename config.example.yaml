@@ -1,0 +1,44 @@
+host: "0.0.0.0"
+port: 8080
+log_level: "info"
+buffer_size: 1000
+ct_logs_url: "https://www.gstatic.com/ct/log_list/v3/all_logs_list.json"
+
+protocols:
+  websocket: true
+  sse: true
+  tcp: false
+  tcp_port: 8081
+
+ct_log:
+  retry_max_attempts: 3
+  retry_initial_delay_ms: 1000
+  retry_max_delay_ms: 30000
+  request_timeout_secs: 30
+  healthy_threshold: 2
+  unhealthy_threshold: 5
+  health_check_interval_secs: 60
+  state_file: null
+  batch_size: 256
+  poll_interval_ms: 1000
+
+rate_limit:
+  enabled: false
+  per_second: 10
+  burst_size: 50
+
+connection_limit:
+  enabled: false
+  max_connections: 10000
+  per_ip_limit: null
+
+auth:
+  enabled: false
+  tokens: []
+  header_name: "Authorization"
+
+hot_reload:
+  enabled: false
+  watch_path: null
+
+custom_logs: []

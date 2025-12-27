@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Demo - certstream-server-rust</title>
+    <meta name="description" content="Watch real-time SSL/TLS certificate issuance from Certificate Transparency logs. Live demo of certstream-server-rust.">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="https://certstream.dev/demo.html">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://certstream.dev/demo.html">
+    <meta property="og:title" content="Live Demo - certstream-server-rust">
+    <meta property="og:description" content="Watch real-time certificate issuance from CT logs.">
+    <meta name="theme-color" content="#b7410e">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.85);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal {
+            background: #111;
+            border: 1px solid #333;
+            border-radius: 12px;
+            max-width: 900px;
+            width: 100%;
+            max-height: 90vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        .modal-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid #222;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .modal-header h3 {
+            font-size: 1.1rem;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .modal-header h3 .badge {
+            background: #b7410e;
+            color: #fff;
+            font-size: 0.7rem;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+        .modal-close {
+            background: none;
+            border: none;
+            color: #666;
+            font-size: 1.5rem;
+            cursor: pointer;
+            padding: 0;
+            line-height: 1;
+        }
+        .modal-close:hover { color: #fff; }
+        .modal-body {
+            padding: 24px;
+            overflow-y: auto;
+            flex: 1;
+        }
+        .cert-detail-section {
+            margin-bottom: 24px;
+        }
+        .cert-detail-section:last-child { margin-bottom: 0; }
+        .cert-detail-section h4 {
+            font-size: 0.8rem;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #222;
+        }
+        .cert-detail-grid {
+            display: grid;
+            grid-template-columns: 140px 1fr;
+            gap: 8px 16px;
+        }
+        .cert-detail-label {
+            color: #666;
+            font-size: 0.85rem;
+        }
+        .cert-detail-value {
+            color: #e8e8e8;
+            font-size: 0.85rem;
+            word-break: break-all;
+        }
+        .cert-detail-value.highlight { color: #4ade80; }
+        .cert-detail-value.mono {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.8rem;
+        }
+        .domains-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .domain-tag {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            color: #4ade80;
+            font-family: 'IBM Plex Mono', monospace;
+        }
+        .json-preview {
+            background: #0a0a0a;
+            border: 1px solid #222;
+            border-radius: 6px;
+            padding: 16px;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 0.75rem;
+            color: #888;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .cert-entry { cursor: pointer; transition: border-color 0.2s; }
+        .cert-entry:hover { border-left-color: #4ade80; }
+        .speed-control {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: 12px;
+            padding-left: 12px;
+            border-left: 1px solid #333;
+        }
+        .speed-control label {
+            font-size: 0.75rem;
+            color: #666;
+        }
+        .speed-control input[type="range"] {
+            width: 80px;
+            height: 4px;
+            -webkit-appearance: none;
+            background: #333;
+            border-radius: 2px;
+            outline: none;
+        }
+        .speed-control input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            background: #b7410e;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+        .speed-value {
+            font-size: 0.75rem;
+            color: #888;
+            min-width: 45px;
+        }
+        @media (max-width: 600px) {
+            .cert-detail-grid { grid-template-columns: 1fr; }
+            .cert-detail-label { margin-bottom: -4px; }
+            .speed-control { display: none; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="wrap">
+            <a href="/" class="logo">certstream-server-rust</a>
+            <nav>
+                <ul class="nav-links">
+                    <li><a href="/">Home</a></li>
+                    <li><a href="docs.html">API Docs</a></li>
+                    <li><a href="demo.html" class="active">Live Demo</a></li>
+                    <li><a href="clients.html">Clients</a></li>
+                    <li><a href="hosting.html">Hosting</a></li>
+                </ul>
+            </nav>
+            <button class="mobile-menu-btn" onclick="document.getElementById('mobile-nav').classList.add('active')"><span></span><span></span><span></span></button>
+            <a href="https://github.com/burakozcn01/certstream-server-rust" class="gh-link" target="_blank" rel="noopener">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                GitHub
+            </a>
+        </div>
+    </header>
+    <div class="mobile-nav" id="mobile-nav">
+        <div class="mobile-nav-header">
+            <a href="/" class="logo">certstream-server-rust</a>
+            <button class="mobile-nav-close" onclick="document.getElementById('mobile-nav').classList.remove('active')">&times;</button>
+        </div>
+        <ul class="mobile-nav-links">
+            <li><a href="/">Home</a></li>
+            <li><a href="docs.html">API Docs</a></li>
+            <li><a href="demo.html" class="active">Live Demo</a></li>
+            <li><a href="clients.html">Clients</a></li>
+            <li><a href="hosting.html">Hosting</a></li>
+            <li><a href="https://github.com/burakozcn01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a></li>
+        </ul>
+    </div>
+
+    <div class="modal-overlay" id="cert-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>Certificate Details <span class="badge">X509</span></h3>
+                <button class="modal-close" id="modal-close">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+        </div>
+    </div>
+
+    <main>
+        <div class="wrap">
+            <div class="page-header">
+                <h1>Live Demo</h1>
+                <p>Watch real-time certificate issuance from Certificate Transparency logs</p>
+            </div>
+        </div>
+
+        <section>
+            <div class="wrap">
+                <div class="live-demo-container">
+                    <div class="live-demo-box">
+                        <div class="live-demo-header">
+                            <div class="title">
+                                <span class="status-dot" id="ws-status"></span>
+                                <span id="ws-status-text">Disconnected</span>
+                            </div>
+                            <div class="live-demo-controls">
+                                <select id="stream-type">
+                                    <option value="/">Lite Stream</option>
+                                    <option value="/full-stream">Full Stream</option>
+                                    <option value="/domains-only">Domains Only</option>
+                                </select>
+                                <button id="connect-btn" class="active">Connect</button>
+                                <button id="clear-btn">Clear</button>
+                                <div class="speed-control">
+                                    <label>Speed</label>
+                                    <input type="range" id="speed-slider" min="1" max="20" value="10">
+                                    <span class="speed-value" id="speed-value">10/s</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="live-demo-stream" id="cert-stream">
+                            <div style="color: #666; text-align: center; padding: 40px;">
+                                Click "Connect" to start streaming certificates
+                            </div>
+                        </div>
+                        <div style="background: #1a1a1a; border-top: 1px solid #222; padding: 10px 16px; display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: #666;">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+                            <span>Click on any certificate to view full details</span>
+                        </div>
+                    </div>
+                    <div class="live-stats">
+                        <div class="live-stat-card">
+                            <h4>Certificates Received</h4>
+                            <div class="value highlight" id="stat-count">0</div>
+                        </div>
+                        <div class="live-stat-card">
+                            <h4>Certificates / sec</h4>
+                            <div class="value" id="stat-rate">0</div>
+                        </div>
+                        <div class="live-stat-card">
+                            <h4>Connection Time</h4>
+                            <div class="value" id="stat-time">00:00</div>
+                        </div>
+                        <div class="live-stat-card">
+                            <h4>Queue Size</h4>
+                            <div class="value" id="stat-queue">0</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>What you're seeing</h2>
+                    <p>Real-time SSL/TLS certificates being issued globally</p>
+                </div>
+                <div class="features-list">
+                    <div class="feature-item">
+                        <h3>60+ CT Logs</h3>
+                        <p>Data aggregated from Google, Cloudflare, DigiCert, Sectigo, and other major Certificate Transparency logs worldwide.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>~500 certs/sec</h3>
+                        <p>Average certificate issuance rate. Peaks during business hours in major regions. Let's Encrypt issues most certificates.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Sub-second latency</h3>
+                        <p>Certificates appear within milliseconds of being logged. Real-time monitoring for phishing and brand protection.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>JSON format</h3>
+                        <p>Each certificate includes domains, issuer, validity period, fingerprint, and CT log source information.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="wrap">
+            <div class="links">
+                <a href="https://github.com/burakozcn01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a>
+                <a href="https://hub.docker.com/r/reloading01/certstream-server-rust" target="_blank" rel="noopener">Docker Hub</a>
+                <a href="docs.html">Documentation</a>
+                <a href="https://github.com/burakozcn01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
+                <a href="https://github.com/burakozcn01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+            </div>
+            <p>certstream-server-rust v1.0.3</p>
+        </div>
+    </footer>
+
+    <script>
+    (function() {
+        var WS_URL = 'wss://ws.certstream.dev';
+        var MAX_ENTRIES = 100;
+        var MAX_QUEUE = 1000;
+
+        var ws = null;
+        var certCount = 0;
+        var startTime = null;
+        var timerInterval = null;
+        var rateInterval = null;
+        var displayInterval = null;
+        var lastCount = 0;
+        var certQueue = [];
+        var displayRate = 10;
+
+        var statusDot = document.getElementById('ws-status');
+        var statusText = document.getElementById('ws-status-text');
+        var streamType = document.getElementById('stream-type');
+        var connectBtn = document.getElementById('connect-btn');
+        var clearBtn = document.getElementById('clear-btn');
+        var certStream = document.getElementById('cert-stream');
+        var statCount = document.getElementById('stat-count');
+        var statRate = document.getElementById('stat-rate');
+        var statTime = document.getElementById('stat-time');
+        var statQueue = document.getElementById('stat-queue');
+        var speedSlider = document.getElementById('speed-slider');
+        var speedValue = document.getElementById('speed-value');
+        var certModal = document.getElementById('cert-modal');
+        var modalBody = document.getElementById('modal-body');
+        var modalClose = document.getElementById('modal-close');
+
+        speedSlider.addEventListener('input', function() {
+            displayRate = parseInt(this.value);
+            speedValue.textContent = displayRate + '/s';
+            restartDisplayInterval();
+        });
+
+        function restartDisplayInterval() {
+            if (displayInterval) clearInterval(displayInterval);
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                var interval = Math.floor(1000 / displayRate);
+                displayInterval = setInterval(displayNextCert, interval);
+            }
+        }
+
+        function displayNextCert() {
+            if (certQueue.length > 0) {
+                var data = certQueue.shift();
+                addCertEntry(data);
+                statQueue.textContent = certQueue.length;
+            }
+        }
+
+        function setStatus(status) {
+            statusDot.className = 'status-dot ' + status;
+            if (status === 'connected') {
+                statusText.textContent = 'Connected';
+                connectBtn.textContent = 'Disconnect';
+                connectBtn.classList.add('active');
+            } else if (status === 'connecting') {
+                statusText.textContent = 'Connecting...';
+                connectBtn.textContent = 'Connecting...';
+            } else if (status === 'error') {
+                statusText.textContent = 'Error';
+                connectBtn.textContent = 'Reconnect';
+                connectBtn.classList.remove('active');
+            } else {
+                statusText.textContent = 'Disconnected';
+                connectBtn.textContent = 'Connect';
+                connectBtn.classList.remove('active');
+            }
+        }
+
+        function formatTime(seconds) {
+            var mins = Math.floor(seconds / 60);
+            var secs = seconds % 60;
+            return String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
+        }
+
+        function formatDate(timestamp) {
+            if (!timestamp) return '-';
+            var d = new Date(timestamp * 1000);
+            return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+        }
+
+        function startTimer() {
+            startTime = Date.now();
+            timerInterval = setInterval(function() {
+                var elapsed = Math.floor((Date.now() - startTime) / 1000);
+                statTime.textContent = formatTime(elapsed);
+            }, 1000);
+
+            rateInterval = setInterval(function() {
+                var rate = certCount - lastCount;
+                statRate.textContent = rate;
+                lastCount = certCount;
+            }, 1000);
+
+            var interval = Math.floor(1000 / displayRate);
+            displayInterval = setInterval(displayNextCert, interval);
+        }
+
+        function stopTimer() {
+            if (timerInterval) clearInterval(timerInterval);
+            if (rateInterval) clearInterval(rateInterval);
+            if (displayInterval) clearInterval(displayInterval);
+            timerInterval = null;
+            rateInterval = null;
+            displayInterval = null;
+        }
+
+        function escapeHtml(text) {
+            if (text === null || text === undefined) return '';
+            var div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        }
+
+        function showCertModal(data) {
+            var cert = data.data || {};
+            var leaf = cert.leaf_cert || {};
+            var subject = leaf.subject || {};
+            var issuer = leaf.issuer || {};
+            var source = cert.source || {};
+            var domains = leaf.all_domains || cert.all_domains || [];
+
+            var html = '';
+
+            html += '<div class="cert-detail-section">';
+            html += '<h4>Domains (' + domains.length + ')</h4>';
+            html += '<div class="domains-list">';
+            domains.forEach(function(d) {
+                html += '<span class="domain-tag">' + escapeHtml(d) + '</span>';
+            });
+            html += '</div></div>';
+
+            html += '<div class="cert-detail-section">';
+            html += '<h4>Certificate Info</h4>';
+            html += '<div class="cert-detail-grid">';
+            html += '<span class="cert-detail-label">Serial Number</span>';
+            html += '<span class="cert-detail-value mono">' + escapeHtml(leaf.serial_number || '-') + '</span>';
+            html += '<span class="cert-detail-label">Fingerprint</span>';
+            html += '<span class="cert-detail-value mono">' + escapeHtml(leaf.fingerprint || '-') + '</span>';
+            html += '<span class="cert-detail-label">Not Before</span>';
+            html += '<span class="cert-detail-value">' + formatDate(leaf.not_before) + '</span>';
+            html += '<span class="cert-detail-label">Not After</span>';
+            html += '<span class="cert-detail-value">' + formatDate(leaf.not_after) + '</span>';
+            html += '</div></div>';
+
+            html += '<div class="cert-detail-section">';
+            html += '<h4>Subject</h4>';
+            html += '<div class="cert-detail-grid">';
+            if (subject.CN) { html += '<span class="cert-detail-label">Common Name</span><span class="cert-detail-value highlight">' + escapeHtml(subject.CN) + '</span>'; }
+            if (subject.O) { html += '<span class="cert-detail-label">Organization</span><span class="cert-detail-value">' + escapeHtml(subject.O) + '</span>'; }
+            if (subject.C) { html += '<span class="cert-detail-label">Country</span><span class="cert-detail-value">' + escapeHtml(subject.C) + '</span>'; }
+            if (subject.ST) { html += '<span class="cert-detail-label">State</span><span class="cert-detail-value">' + escapeHtml(subject.ST) + '</span>'; }
+            if (subject.L) { html += '<span class="cert-detail-label">Locality</span><span class="cert-detail-value">' + escapeHtml(subject.L) + '</span>'; }
+            if (Object.keys(subject).length === 0) { html += '<span class="cert-detail-value" style="grid-column: 1/-1; color: #666;">No subject information</span>'; }
+            html += '</div></div>';
+
+            html += '<div class="cert-detail-section">';
+            html += '<h4>Issuer</h4>';
+            html += '<div class="cert-detail-grid">';
+            if (issuer.CN) { html += '<span class="cert-detail-label">Common Name</span><span class="cert-detail-value">' + escapeHtml(issuer.CN) + '</span>'; }
+            if (issuer.O) { html += '<span class="cert-detail-label">Organization</span><span class="cert-detail-value">' + escapeHtml(issuer.O) + '</span>'; }
+            if (issuer.C) { html += '<span class="cert-detail-label">Country</span><span class="cert-detail-value">' + escapeHtml(issuer.C) + '</span>'; }
+            html += '</div></div>';
+
+            html += '<div class="cert-detail-section">';
+            html += '<h4>CT Log Source</h4>';
+            html += '<div class="cert-detail-grid">';
+            html += '<span class="cert-detail-label">Log Name</span><span class="cert-detail-value">' + escapeHtml(source.name || '-') + '</span>';
+            html += '<span class="cert-detail-label">Log URL</span><span class="cert-detail-value mono">' + escapeHtml(source.url || '-') + '</span>';
+            html += '<span class="cert-detail-label">Cert Index</span><span class="cert-detail-value mono">' + escapeHtml(cert.cert_index || '-') + '</span>';
+            html += '<span class="cert-detail-label">Seen At</span><span class="cert-detail-value">' + formatDate(cert.seen) + '</span>';
+            html += '</div></div>';
+
+            html += '<div class="cert-detail-section">';
+            html += '<h4>Raw JSON</h4>';
+            html += '<pre class="json-preview">' + escapeHtml(JSON.stringify(data, null, 2)) + '</pre>';
+            html += '</div>';
+
+            modalBody.innerHTML = html;
+            certModal.classList.add('active');
+        }
+
+        modalClose.addEventListener('click', function() {
+            certModal.classList.remove('active');
+        });
+
+        certModal.addEventListener('click', function(e) {
+            if (e.target === certModal) {
+                certModal.classList.remove('active');
+            }
+        });
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                certModal.classList.remove('active');
+            }
+        });
+
+        function addCertEntry(data) {
+            var entry = document.createElement('div');
+            entry.className = 'cert-entry';
+
+            var domains = [];
+            var source = '-';
+            var issuer = '-';
+
+            if (data.data) {
+                if (data.data.leaf_cert && data.data.leaf_cert.all_domains) {
+                    domains = data.data.leaf_cert.all_domains;
+                } else if (data.data.all_domains) {
+                    domains = data.data.all_domains;
+                }
+                if (data.data.source && data.data.source.name) {
+                    source = data.data.source.name;
+                }
+                if (data.data.leaf_cert && data.data.leaf_cert.issuer) {
+                    var iss = data.data.leaf_cert.issuer;
+                    issuer = iss.CN || iss.O || '-';
+                }
+            }
+
+            var domainsText = domains.slice(0, 3).map(escapeHtml).join(', ') || 'N/A';
+            if (domains.length > 3) {
+                domainsText += ' (+' + (domains.length - 3) + ' more)';
+            }
+
+            entry.innerHTML =
+                '<div class="domains">' + domainsText + '</div>' +
+                '<div class="meta">' +
+                '<span>Issuer: ' + escapeHtml(issuer) + '</span>' +
+                '<span>Source: ' + escapeHtml(source) + '</span>' +
+                '</div>';
+
+            entry.addEventListener('click', function() {
+                showCertModal(data);
+            });
+
+            certStream.insertBefore(entry, certStream.firstChild);
+
+            while (certStream.children.length > MAX_ENTRIES) {
+                certStream.removeChild(certStream.lastChild);
+            }
+
+            certCount++;
+            statCount.textContent = certCount.toLocaleString();
+        }
+
+        function connect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+
+            setStatus('connecting');
+            var endpoint = WS_URL + streamType.value;
+            certQueue = [];
+
+            try {
+                ws = new WebSocket(endpoint);
+
+                ws.onopen = function() {
+                    setStatus('connected');
+                    certStream.innerHTML = '';
+                    certCount = 0;
+                    lastCount = 0;
+                    statCount.textContent = '0';
+                    statRate.textContent = '0';
+                    statQueue.textContent = '0';
+                    startTimer();
+                };
+
+                ws.onmessage = function(event) {
+                    var processMessage = function(text) {
+                        try {
+                            var data = JSON.parse(text);
+                            if (data.message_type === 'certificate_update') {
+                                if (certQueue.length < MAX_QUEUE) {
+                                    certQueue.push(data);
+                                    statQueue.textContent = certQueue.length;
+                                }
+                            }
+                        } catch (e) {
+                            console.error('Parse error:', e);
+                        }
+                    };
+
+                    if (event.data instanceof Blob) {
+                        var reader = new FileReader();
+                        reader.onload = function() {
+                            processMessage(reader.result);
+                        };
+                        reader.readAsText(event.data);
+                    } else {
+                        processMessage(event.data);
+                    }
+                };
+
+                ws.onerror = function() {
+                    setStatus('error');
+                    stopTimer();
+                };
+
+                ws.onclose = function() {
+                    if (statusDot.classList.contains('connected')) {
+                        setStatus('');
+                    }
+                    stopTimer();
+                    ws = null;
+                };
+            } catch (e) {
+                setStatus('error');
+                console.error('WebSocket error:', e);
+            }
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            setStatus('');
+            stopTimer();
+        }
+
+        connectBtn.addEventListener('click', function() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                disconnect();
+            } else {
+                connect();
+            }
+        });
+
+        clearBtn.addEventListener('click', function() {
+            certStream.innerHTML = '<div style="color: #666; text-align: center; padding: 40px;">Stream cleared</div>';
+            certCount = 0;
+            lastCount = 0;
+            certQueue = [];
+            statCount.textContent = '0';
+            statRate.textContent = '0';
+            statQueue.textContent = '0';
+        });
+
+        streamType.addEventListener('change', function() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                disconnect();
+                setTimeout(connect, 100);
+            }
+        });
+    })();
+    </script>
+</body>
+</html>

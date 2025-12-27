@@ -1,0 +1,7 @@
+/target
+.env
+*.pem
+*.key
+*.crt
+config.yaml
+config.yml

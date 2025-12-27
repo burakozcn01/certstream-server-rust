@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>certstream-server-rust - Real-Time Certificate Transparency Log Streaming</title>
+    <meta name="description" content="High-performance Certificate Transparency log streaming server written in Rust. Stream SSL/TLS certificates in real-time via WebSocket, SSE, and TCP. 12MB memory, 50K+ concurrent clients.">
+    <meta name="keywords" content="certstream, certificate transparency, CT logs, SSL monitoring, TLS certificates, rust, websocket, sse, tcp, real-time, security, phishing detection, brand protection">
+    <meta name="author" content="burakozcn01">
+    <meta name="robots" content="index, follow">
+    <link rel="canonical" href="https://certstream.dev/">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://certstream.dev/">
+    <meta property="og:title" content="certstream-server-rust - Real-Time CT Log Streaming">
+    <meta property="og:description" content="High-performance CT log streaming server in Rust. WebSocket, SSE, TCP support. 12MB memory, 50K+ concurrent clients.">
+    <meta property="og:site_name" content="certstream-server-rust">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="certstream-server-rust - Real-Time CT Log Streaming">
+    <meta name="twitter:description" content="CT log streaming in Rust. WebSocket, SSE, TCP. 12MB memory, 50K+ clients.">
+    <meta name="theme-color" content="#b7410e">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "certstream-server-rust",
+        "description": "High-performance Certificate Transparency log streaming server written in Rust",
+        "url": "https://certstream.dev/",
+        "applicationCategory": "SecurityApplication",
+        "operatingSystem": "Linux, macOS, Windows",
+        "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+        },
+        "aggregateRating": {
+            "@type": "AggregateRating",
+            "ratingValue": "5",
+            "ratingCount": "12",
+            "bestRating": "5",
+            "worstRating": "1"
+        },
+        "author": {
+            "@type": "Person",
+            "name": "burakozcn01",
+            "url": "https://github.com/burakozcn01"
+        },
+        "codeRepository": "https://github.com/burakozcn01/certstream-server-rust",
+        "programmingLanguage": "Rust",
+        "license": "https://opensource.org/licenses/MIT"
+    }
+    </script>
+</head>
+<body>
+    <header>
+        <div class="wrap">
+            <a href="/" class="logo">certstream-server-rust</a>
+            <nav>
+                <ul class="nav-links">
+                    <li><a href="/" class="active">Home</a></li>
+                    <li><a href="docs.html">API Docs</a></li>
+                    <li><a href="demo.html">Live Demo</a></li>
+                    <li><a href="clients.html">Clients</a></li>
+                    <li><a href="hosting.html">Hosting</a></li>
+                </ul>
+            </nav>
+            <button class="mobile-menu-btn" onclick="document.getElementById('mobile-nav').classList.add('active')"><span></span><span></span><span></span></button>
+            <a href="https://github.com/burakozcn01/certstream-server-rust" class="gh-link" target="_blank" rel="noopener">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                GitHub
+            </a>
+        </div>
+    </header>
+    <div class="mobile-nav" id="mobile-nav">
+        <div class="mobile-nav-header">
+            <a href="/" class="logo">certstream-server-rust</a>
+            <button class="mobile-nav-close" onclick="document.getElementById('mobile-nav').classList.remove('active')">&times;</button>
+        </div>
+        <ul class="mobile-nav-links">
+            <li><a href="/" class="active">Home</a></li>
+            <li><a href="docs.html">API Docs</a></li>
+            <li><a href="demo.html">Live Demo</a></li>
+            <li><a href="clients.html">Clients</a></li>
+            <li><a href="hosting.html">Hosting</a></li>
+            <li><a href="https://github.com/burakozcn01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a></li>
+        </ul>
+    </div>
+
+    <main>
+        <section class="hero">
+            <div class="wrap">
+                <h1>Real-time <span class="hl">Certificate Transparency</span> log streaming</h1>
+                <p class="hero-desc">
+                    Drop-in replacement for certstream-server. Streams via WebSocket, SSE, and TCP.
+                    60+ CT logs, handles 50K+ concurrent clients.
+                </p>
+                <div class="hero-stats">
+                    <div class="hero-stat">
+                        <strong>~12 MB</strong>
+                        <span>Memory (idle)</span>
+                    </div>
+                    <div class="hero-stat">
+                        <strong>0.33ms</strong>
+                        <span>Min latency</span>
+                    </div>
+                    <div class="hero-stat">
+                        <strong>50K+</strong>
+                        <span>Max clients</span>
+                    </div>
+                    <div class="hero-stat">
+                        <strong>~6%</strong>
+                        <span>CPU (500 clients)</span>
+                    </div>
+                </div>
+                <div class="hero-actions">
+                    <a href="demo.html" class="btn btn-primary">Try Live Demo</a>
+                    <a href="https://github.com/burakozcn01/certstream-server-rust" class="btn btn-secondary" target="_blank" rel="noopener">View on GitHub</a>
+                </div>
+                <div class="install-box">
+                    <code>docker run -d -p 8080:8080 reloading01/certstream-server-rust:latest</code>
+                    <button onclick="navigator.clipboard.writeText('docker run -d -p 8080:8080 reloading01/certstream-server-rust:latest');this.textContent='Copied!'">Copy</button>
+                </div>
+            </div>
+        </section>
+
+        <section id="features">
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>What you get</h2>
+                    <p>Built for security teams, researchers, and developers who need reliable CT monitoring</p>
+                </div>
+                <div class="features-list">
+                    <div class="feature-item">
+                        <h3>Multi-protocol streaming</h3>
+                        <p>WebSocket, SSE (Server-Sent Events), and raw TCP. Pick the protocol that fits your stack. SSE for browsers, TCP for pipelines.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>State persistence</h3>
+                        <p>Resume from last position after restart. No certificate loss during maintenance or updates. Configurable state file.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Rate &amp; connection limiting</h3>
+                        <p>Configurable rate limits per second with burst. Per-IP and total connection limits. Production-ready protection.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Token authentication</h3>
+                        <p>Bearer token based auth for API access control. Multiple tokens supported. Configurable header name.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Hot reload config</h3>
+                        <p>Config changes apply without restart. File watcher detects updates. Zero-downtime configuration.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>CT log health</h3>
+                        <p>Automatic retry with exponential backoff. Circuit breaker for unhealthy logs. Configurable health thresholds.</p>
+                    </div>
+                    <div class="feature-item">
+                        <h3>Prometheus metrics</h3>
+                        <p>Built-in /metrics endpoint. Connection counts per protocol, message throughput, CT log health.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="performance">
+            <div class="wrap">
+                <div class="section-header">
+                    <h2>Performance</h2>
+                    <p>Load tested with 1,000 concurrent WebSocket clients (same machine, same conditions)</p>
+                </div>
+                <div class="comparison-grid">
+                    <div class="comparison-cell header"></div>
+                    <div class="comparison-cell header">Rust</div>
+                    <div class="comparison-cell header">Go</div>
+                    <div class="comparison-cell label">Memory (idle)</div>
+                    <div class="comparison-cell"><span class="value best">~12 MB</span></div>
+                    <div class="comparison-cell"><span class="value">~100 MB</span></div>
+                    <div class="comparison-cell label">Memory (avg under load)</div>
+                    <div class="comparison-cell"><span class="value best">22 MB</span></div>
+                    <div class="comparison-cell"><span class="value">254 MB</span></div>
+                    <div class="comparison-cell label">CPU (avg under load)</div>
+                    <div class="comparison-cell"><span class="value best">~15%</span></div>
+                    <div class="comparison-cell"><span class="value">~34%</span></div>
+                    <div class="comparison-cell label">Latency (avg)</div>
+                    <div class="comparison-cell"><span class="value best">3.4ms</span></div>
+                    <div class="comparison-cell"><span class="value">31ms</span></div>
+                    <div class="comparison-cell label">Latency (min)</div>
+                    <div class="comparison-cell"><span class="value best">0.16ms</span></div>
+                    <div class="comparison-cell"><span class="value">1.7ms</span></div>
+                    <div class="comparison-cell label">Throughput</div>
+                    <div class="comparison-cell"><span class="value best">677K msg</span></div>
+                    <div class="comparison-cell"><span class="value">267K msg</span></div>
+                </div>
+                <p style="margin-top: 24px; color: #666; font-size: 0.85rem; text-align: center;">
+                    Rust: 12x less memory, 9x faster latency, 2.5x higher throughput.
+                </p>
+            </div>
+        </section>
+
+    </main>
+
+    <footer>
+        <div class="wrap">
+            <div class="links">
+                <a href="https://github.com/burakozcn01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a>
+                <a href="https://hub.docker.com/r/reloading01/certstream-server-rust" target="_blank" rel="noopener">Docker Hub</a>
+                <a href="docs.html">Documentation</a>
+                <a href="https://github.com/burakozcn01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
+                <a href="https://github.com/burakozcn01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+            </div>
+            <p>certstream-server-rust v1.0.3</p>
+        </div>
+    </footer>
+</body>
+</html>
