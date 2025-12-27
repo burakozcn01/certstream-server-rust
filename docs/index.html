@@ -143,8 +143,8 @@
                         <p>Resume from last position after restart. No certificate loss during maintenance or updates. Configurable state file.</p>
                     </div>
                     <div class="feature-item">
-                        <h3>Rate &amp; connection limiting</h3>
-                        <p>Configurable rate limits per second with burst. Per-IP and total connection limits. Production-ready protection.</p>
+                        <h3>Connection limiting</h3>
+                        <p>Per-IP and total connection limits. Production-ready protection against abuse.</p>
                     </div>
                     <div class="feature-item">
                         <h3>Token authentication</h3>
@@ -170,21 +170,21 @@
             <div class="wrap">
                 <div class="section-header">
                     <h2>Performance</h2>
-                    <p>Load tested with 1,000 concurrent WebSocket clients (same machine, same conditions)</p>
+                    <p>Load tested with 500 concurrent WebSocket clients (same machine, same conditions)</p>
                 </div>
                 <div class="comparison-grid">
                     <div class="comparison-cell header"></div>
                     <div class="comparison-cell header">Rust</div>
                     <div class="comparison-cell header">Go</div>
                     <div class="comparison-cell label">Memory (idle)</div>
-                    <div class="comparison-cell"><span class="value best">~12 MB</span></div>
+                    <div class="comparison-cell"><span class="value best">~26 MB</span></div>
                     <div class="comparison-cell"><span class="value">~100 MB</span></div>
                     <div class="comparison-cell label">Memory (avg under load)</div>
                     <div class="comparison-cell"><span class="value best">22 MB</span></div>
                     <div class="comparison-cell"><span class="value">254 MB</span></div>
                     <div class="comparison-cell label">CPU (avg under load)</div>
-                    <div class="comparison-cell"><span class="value best">~15%</span></div>
-                    <div class="comparison-cell"><span class="value">~34%</span></div>
+                    <div class="comparison-cell"><span class="value best">~29%</span></div>
+                    <div class="comparison-cell"><span class="value">~76%</span></div>
                     <div class="comparison-cell label">Latency (avg)</div>
                     <div class="comparison-cell"><span class="value best">3.4ms</span></div>
                     <div class="comparison-cell"><span class="value">31ms</span></div>
@@ -212,7 +212,7 @@
                 <a href="https://github.com/burakozcn01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
                 <a href="https://github.com/burakozcn01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
             </div>
-            <p>certstream-server-rust v1.0.3</p>
+            <p>certstream-server-rust v1.0.4</p>
         </div>
     </footer>
 </body>

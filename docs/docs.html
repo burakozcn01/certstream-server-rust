@@ -89,39 +89,6 @@
         <section>
             <div class="wrap">
                 <div class="section-header">
-                    <h2>Features</h2>
-                    <p>Core capabilities and v1.0.3 additions</p>
-                </div>
-                <div class="features-list">
-                    <div class="feature-item">
-                        <h3>Core Features</h3>
-                        <ul>
-                            <li>WebSocket, SSE, and raw TCP streaming</li>
-                            <li>Pre-serialized messages (serialize once, broadcast to all)</li>
-                            <li>Works with existing certstream clients</li>
-                            <li>Prometheus metrics</li>
-                            <li>TLS support</li>
-                            <li>60+ CT logs monitored</li>
-                        </ul>
-                    </div>
-                    <div class="feature-item">
-                        <h3>v1.0.3 New Features</h3>
-                        <ul>
-                            <li><strong>State Persistence:</strong> Resume from last position after restart</li>
-                            <li><strong>Rate Limiting:</strong> Configurable requests per second with burst</li>
-                            <li><strong>Connection Limiting:</strong> Max total and per-IP connections</li>
-                            <li><strong>Token Authentication:</strong> Bearer token based auth</li>
-                            <li><strong>Hot Reload:</strong> Config changes without restart</li>
-                            <li><strong>CT Log Health:</strong> Automatic retry, circuit breaker, health checks</li>
-                        </ul>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <section>
-            <div class="wrap">
-                <div class="section-header">
                     <h2>Endpoints</h2>
                     <p>Connect using WebSocket, Server-Sent Events, or raw TCP</p>
                 </div>
@@ -488,33 +455,20 @@ docker compose up -d</pre>
                             <td>8081</td>
                             <td>TCP port</td>
                         </tr>
-                    </tbody>
-                </table>
-
-                <h3 style="margin-bottom: 1rem; margin-top: 2rem;">Rate Limiting</h3>
-                <table class="endpoints-table">
-                    <thead>
                         <tr>
-                            <th>Variable</th>
-                            <th>Default</th>
-                            <th>Description</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr>
-                            <td><code>CERTSTREAM_RATE_LIMIT_ENABLED</code></td>
-                            <td>false</td>
-                            <td>Enable rate limiting</td>
+                            <td><code>CERTSTREAM_METRICS_ENABLED</code></td>
+                            <td>true</td>
+                            <td>Enable /metrics endpoint</td>
                         </tr>
                         <tr>
-                            <td><code>CERTSTREAM_RATE_LIMIT_PER_SECOND</code></td>
-                            <td>10</td>
-                            <td>Requests per second</td>
+                            <td><code>CERTSTREAM_HEALTH_ENABLED</code></td>
+                            <td>true</td>
+                            <td>Enable /health endpoint</td>
                         </tr>
                         <tr>
-                            <td><code>CERTSTREAM_RATE_LIMIT_BURST_SIZE</code></td>
-                            <td>20</td>
-                            <td>Burst allowance</td>
+                            <td><code>CERTSTREAM_EXAMPLE_JSON_ENABLED</code></td>
+                            <td>true</td>
+                            <td>Enable /example.json endpoint</td>
                         </tr>
                     </tbody>
                 </table>
@@ -656,6 +610,9 @@ docker compose up -d</pre>
   <span class="str">sse</span>: <span class="var">true</span>
   <span class="str">tcp</span>: <span class="var">true</span>
   <span class="str">tcp_port</span>: <span class="var">8081</span>
+  <span class="str">metrics</span>: <span class="var">true</span>
+  <span class="str">health</span>: <span class="var">true</span>
+  <span class="str">example_json</span>: <span class="var">true</span>
 
 <span class="str">ct_log</span>:
   <span class="str">state_file</span>: <span class="str">"/data/state.json"</span>
@@ -663,11 +620,6 @@ docker compose up -d</pre>
   <span class="str">poll_interval_ms</span>: <span class="var">500</span>
   <span class="str">retry_max_attempts</span>: <span class="var">3</span>
   <span class="str">request_timeout_secs</span>: <span class="var">30</span>
-
-<span class="str">rate_limit</span>:
-  <span class="str">enabled</span>: <span class="var">true</span>
-  <span class="str">per_second</span>: <span class="var">10</span>
-  <span class="str">burst_size</span>: <span class="var">20</span>
 
 <span class="str">connection_limit</span>:
   <span class="str">enabled</span>: <span class="var">true</span>
@@ -697,7 +649,7 @@ docker compose up -d</pre>
             <div class="wrap">
                 <div class="section-header">
                     <h2>Performance</h2>
-                    <p>Load tested with 1,000 concurrent WebSocket clients</p>
+                    <p>Load tested with 500 concurrent WebSocket clients</p>
                 </div>
                 <table class="endpoints-table">
                     <thead>
@@ -710,7 +662,7 @@ docker compose up -d</pre>
                     <tbody>
                         <tr>
                             <td>Memory (idle)</td>
-                            <td><strong>~12 MB</strong></td>
+                            <td><strong>~26 MB</strong></td>
                             <td>~100 MB</td>
                         </tr>
                         <tr>
@@ -720,8 +672,8 @@ docker compose up -d</pre>
                         </tr>
                         <tr>
                             <td>CPU (avg under load)</td>
-                            <td><strong>~15%</strong></td>
-                            <td>~34%</td>
+                            <td><strong>~29%</strong></td>
+                            <td>~76%</td>
                         </tr>
                         <tr>
                             <td>Latency (avg)</td>
@@ -812,7 +764,7 @@ docker compose up -d</pre>
                 <a href="https://github.com/burakozcn01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
                 <a href="https://github.com/burakozcn01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
             </div>
-            <p>certstream-server-rust v1.0.3</p>
+            <p>certstream-server-rust v1.0.4</p>
         </div>
     </footer>
 </body>

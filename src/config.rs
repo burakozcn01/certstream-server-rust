@@ -22,6 +22,10 @@ pub struct ProtocolConfig {
     pub tcp_port: Option<u16>,
     #[serde(default = "default_true")]
     pub metrics: bool,
+    #[serde(default = "default_true")]
+    pub health: bool,
+    #[serde(default = "default_true")]
+    pub example_json: bool,
 }
 
 impl Default for ProtocolConfig {
@@ -32,6 +36,8 @@ impl Default for ProtocolConfig {
             tcp: false,
             tcp_port: None,
             metrics: true,
+            health: true,
+            example_json: true,
         }
     }
 }
@@ -103,33 +109,6 @@ fn default_batch_size() -> u64 {
 }
 fn default_poll_interval_ms() -> u64 {
     1000
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct RateLimitConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_per_second")]
-    pub per_second: u64,
-    #[serde(default = "default_burst_size")]
-    pub burst_size: u32,
-}
-
-impl Default for RateLimitConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            per_second: default_per_second(),
-            burst_size: default_burst_size(),
-        }
-    }
-}
-
-fn default_per_second() -> u64 {
-    10
-}
-fn default_burst_size() -> u32 {
-    50
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -213,7 +192,6 @@ pub struct Config {
     pub custom_logs: Vec<CustomCtLog>,
     pub protocols: ProtocolConfig,
     pub ct_log: CtLogConfig,
-    pub rate_limit: RateLimitConfig,
     pub connection_limit: ConnectionLimitConfig,
     pub auth: AuthConfig,
     pub hot_reload: HotReloadConfig,
@@ -235,8 +213,6 @@ struct YamlConfig {
     protocols: Option<ProtocolConfig>,
     #[serde(default)]
     ct_log: Option<CtLogConfig>,
-    #[serde(default)]
-    rate_limit: Option<RateLimitConfig>,
     #[serde(default)]
     connection_limit: Option<ConnectionLimitConfig>,
     #[serde(default)]
@@ -305,6 +281,12 @@ impl Config {
             let metrics = env::var("CERTSTREAM_METRICS_ENABLED")
                 .map(|v| v.parse().unwrap_or(true))
                 .unwrap_or(true);
+            let health = env::var("CERTSTREAM_HEALTH_ENABLED")
+                .map(|v| v.parse().unwrap_or(true))
+                .unwrap_or(true);
+            let example_json = env::var("CERTSTREAM_EXAMPLE_JSON_ENABLED")
+                .map(|v| v.parse().unwrap_or(true))
+                .unwrap_or(true);
 
             ProtocolConfig {
                 websocket: ws,
@@ -312,54 +294,42 @@ impl Config {
                 tcp,
                 tcp_port,
                 metrics,
+                health,
+                example_json,
             }
         });
 
         let ct_log = yaml_config.ct_log.unwrap_or_else(|| {
             let mut cfg = CtLogConfig::default();
-            if let Ok(v) = env::var("CERTSTREAM_RETRY_MAX_ATTEMPTS") {
+            if let Ok(v) = env::var("CERTSTREAM_CT_LOG_RETRY_MAX_ATTEMPTS") {
                 cfg.retry_max_attempts = v.parse().unwrap_or(cfg.retry_max_attempts);
             }
-            if let Ok(v) = env::var("CERTSTREAM_RETRY_INITIAL_DELAY_MS") {
+            if let Ok(v) = env::var("CERTSTREAM_CT_LOG_RETRY_INITIAL_DELAY_MS") {
                 cfg.retry_initial_delay_ms = v.parse().unwrap_or(cfg.retry_initial_delay_ms);
             }
-            if let Ok(v) = env::var("CERTSTREAM_RETRY_MAX_DELAY_MS") {
+            if let Ok(v) = env::var("CERTSTREAM_CT_LOG_RETRY_MAX_DELAY_MS") {
                 cfg.retry_max_delay_ms = v.parse().unwrap_or(cfg.retry_max_delay_ms);
             }
-            if let Ok(v) = env::var("CERTSTREAM_REQUEST_TIMEOUT_SECS") {
+            if let Ok(v) = env::var("CERTSTREAM_CT_LOG_REQUEST_TIMEOUT_SECS") {
                 cfg.request_timeout_secs = v.parse().unwrap_or(cfg.request_timeout_secs);
             }
-            if let Ok(v) = env::var("CERTSTREAM_UNHEALTHY_THRESHOLD") {
+            if let Ok(v) = env::var("CERTSTREAM_CT_LOG_UNHEALTHY_THRESHOLD") {
                 cfg.unhealthy_threshold = v.parse().unwrap_or(cfg.unhealthy_threshold);
             }
-            if let Ok(v) = env::var("CERTSTREAM_HEALTHY_THRESHOLD") {
+            if let Ok(v) = env::var("CERTSTREAM_CT_LOG_HEALTHY_THRESHOLD") {
                 cfg.healthy_threshold = v.parse().unwrap_or(cfg.healthy_threshold);
             }
-            if let Ok(v) = env::var("CERTSTREAM_HEALTH_CHECK_INTERVAL_SECS") {
+            if let Ok(v) = env::var("CERTSTREAM_CT_LOG_HEALTH_CHECK_INTERVAL_SECS") {
                 cfg.health_check_interval_secs = v.parse().unwrap_or(cfg.health_check_interval_secs);
             }
-            if let Ok(v) = env::var("CERTSTREAM_STATE_FILE") {
+            if let Ok(v) = env::var("CERTSTREAM_CT_LOG_STATE_FILE") {
                 cfg.state_file = Some(v);
             }
-            if let Ok(v) = env::var("CERTSTREAM_BATCH_SIZE") {
+            if let Ok(v) = env::var("CERTSTREAM_CT_LOG_BATCH_SIZE") {
                 cfg.batch_size = v.parse().unwrap_or(cfg.batch_size);
             }
-            if let Ok(v) = env::var("CERTSTREAM_POLL_INTERVAL_MS") {
+            if let Ok(v) = env::var("CERTSTREAM_CT_LOG_POLL_INTERVAL_MS") {
                 cfg.poll_interval_ms = v.parse().unwrap_or(cfg.poll_interval_ms);
-            }
-            cfg
-        });
-
-        let rate_limit = yaml_config.rate_limit.unwrap_or_else(|| {
-            let mut cfg = RateLimitConfig::default();
-            if let Ok(v) = env::var("CERTSTREAM_RATE_LIMIT_ENABLED") {
-                cfg.enabled = v.parse().unwrap_or(false);
-            }
-            if let Ok(v) = env::var("CERTSTREAM_RATE_LIMIT_PER_SECOND") {
-                cfg.per_second = v.parse().unwrap_or(cfg.per_second);
-            }
-            if let Ok(v) = env::var("CERTSTREAM_RATE_LIMIT_BURST_SIZE") {
-                cfg.burst_size = v.parse().unwrap_or(cfg.burst_size);
             }
             cfg
         });
@@ -369,10 +339,10 @@ impl Config {
             if let Ok(v) = env::var("CERTSTREAM_CONNECTION_LIMIT_ENABLED") {
                 cfg.enabled = v.parse().unwrap_or(false);
             }
-            if let Ok(v) = env::var("CERTSTREAM_MAX_CONNECTIONS") {
+            if let Ok(v) = env::var("CERTSTREAM_CONNECTION_LIMIT_MAX_CONNECTIONS") {
                 cfg.max_connections = v.parse().unwrap_or(cfg.max_connections);
             }
-            if let Ok(v) = env::var("CERTSTREAM_PER_IP_LIMIT") {
+            if let Ok(v) = env::var("CERTSTREAM_CONNECTION_LIMIT_PER_IP_LIMIT") {
                 cfg.per_ip_limit = v.parse().ok();
             }
             cfg
@@ -386,7 +356,7 @@ impl Config {
             if let Ok(v) = env::var("CERTSTREAM_AUTH_TOKENS") {
                 cfg.tokens = v.split(',').map(|s| s.trim().to_string()).collect();
             }
-            if let Ok(v) = env::var("CERTSTREAM_AUTH_HEADER") {
+            if let Ok(v) = env::var("CERTSTREAM_AUTH_HEADER_NAME") {
                 cfg.header_name = v;
             }
             cfg
@@ -411,7 +381,6 @@ impl Config {
             custom_logs: yaml_config.custom_logs,
             protocols,
             ct_log,
-            rate_limit,
             connection_limit,
             auth,
             hot_reload,

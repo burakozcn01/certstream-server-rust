@@ -9,6 +9,9 @@ protocols:
   sse: true
   tcp: false
   tcp_port: 8081
+  metrics: true
+  health: true
+  example_json: true
 
 ct_log:
   retry_max_attempts: 3
@@ -21,11 +24,6 @@ ct_log:
   state_file: null
   batch_size: 256
   poll_interval_ms: 1000
-
-rate_limit:
-  enabled: false
-  per_second: 10
-  burst_size: 50
 
 connection_limit:
   enabled: false

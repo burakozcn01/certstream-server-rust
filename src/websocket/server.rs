@@ -1,10 +1,12 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        ConnectInfo, State,
     },
+    http::StatusCode,
     response::IntoResponse,
 };
+use std::net::{IpAddr, SocketAddr};
 use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -13,6 +15,7 @@ use tokio::sync::broadcast;
 use tokio::time::interval;
 use tracing::{debug, info};
 
+use crate::middleware::ConnectionLimiter;
 use crate::models::PreSerializedMessage;
 
 static HEARTBEAT_JSON: &str = r#"{"message_type":"heartbeat"}"#;
@@ -20,6 +23,7 @@ static HEARTBEAT_JSON: &str = r#"{"message_type":"heartbeat"}"#;
 pub struct AppState {
     pub tx: broadcast::Sender<Arc<PreSerializedMessage>>,
     pub connections: ConnectionCounter,
+    pub limiter: Arc<ConnectionLimiter>,
 }
 
 #[derive(Default)]
@@ -75,25 +79,43 @@ impl ConnectionCounter {
 pub async fn handle_full_stream(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
+    let ip = addr.ip();
+    if !state.limiter.try_acquire(ip) {
+        return (StatusCode::TOO_MANY_REQUESTS, "Connection limit exceeded").into_response();
+    }
     let rx = state.tx.subscribe();
-    ws.on_upgrade(move |socket| handle_socket(socket, rx, StreamType::Full, state))
+    ws.on_upgrade(move |socket| handle_socket(socket, rx, StreamType::Full, state, ip))
+        .into_response()
 }
 
 pub async fn handle_lite_stream(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
+    let ip = addr.ip();
+    if !state.limiter.try_acquire(ip) {
+        return (StatusCode::TOO_MANY_REQUESTS, "Connection limit exceeded").into_response();
+    }
     let rx = state.tx.subscribe();
-    ws.on_upgrade(move |socket| handle_socket(socket, rx, StreamType::Lite, state))
+    ws.on_upgrade(move |socket| handle_socket(socket, rx, StreamType::Lite, state, ip))
+        .into_response()
 }
 
 pub async fn handle_domains_only(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
+    let ip = addr.ip();
+    if !state.limiter.try_acquire(ip) {
+        return (StatusCode::TOO_MANY_REQUESTS, "Connection limit exceeded").into_response();
+    }
     let rx = state.tx.subscribe();
-    ws.on_upgrade(move |socket| handle_socket(socket, rx, StreamType::DomainsOnly, state))
+    ws.on_upgrade(move |socket| handle_socket(socket, rx, StreamType::DomainsOnly, state, ip))
+        .into_response()
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +130,7 @@ async fn handle_socket(
     mut rx: broadcast::Receiver<Arc<PreSerializedMessage>>,
     stream_type: StreamType,
     state: Arc<AppState>,
+    client_ip: IpAddr,
 ) {
     let (mut sender, mut receiver) = socket.split();
 
@@ -121,6 +144,7 @@ async fn handle_socket(
     info!(
         stream = stream_name,
         total = state.connections.total(),
+        ip = %client_ip,
         "WS client connected"
     );
 
@@ -176,10 +200,13 @@ async fn handle_socket(
         }
     }
 
+    // Release connection limit when socket closes
+    state.limiter.release(client_ip);
     state.connections.decrement(stream_type);
     info!(
         stream = stream_name,
         total = state.connections.total(),
+        ip = %client_ip,
         "WS client disconnected"
     );
 }

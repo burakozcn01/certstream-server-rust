@@ -4,12 +4,11 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
-use crate::config::{AuthConfig, ConnectionLimitConfig, RateLimitConfig};
+use crate::config::{AuthConfig, ConnectionLimitConfig};
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct HotReloadableConfig {
-    pub rate_limit: RateLimitConfig,
     pub connection_limit: ConnectionLimitConfig,
     pub auth: AuthConfig,
 }
@@ -103,8 +102,6 @@ fn load_hot_reloadable_config(path: &str) -> Option<HotReloadableConfig> {
     #[derive(Deserialize, Default)]
     struct PartialConfig {
         #[serde(default)]
-        rate_limit: Option<RateLimitConfig>,
-        #[serde(default)]
         connection_limit: Option<ConnectionLimitConfig>,
         #[serde(default)]
         auth: Option<AuthConfig>,
@@ -113,7 +110,6 @@ fn load_hot_reloadable_config(path: &str) -> Option<HotReloadableConfig> {
     match std::fs::read_to_string(path) {
         Ok(content) => match serde_yaml::from_str::<PartialConfig>(&content) {
             Ok(cfg) => Some(HotReloadableConfig {
-                rate_limit: cfg.rate_limit.unwrap_or_default(),
                 connection_limit: cfg.connection_limit.unwrap_or_default(),
                 auth: cfg.auth.unwrap_or_default(),
             }),

@@ -1,6 +1,6 @@
 [package]
 name = "certstream-server-rust"
-version = "1.0.2"
+version = "1.0.4"
 edition = "2024"
 repository = "https://github.com/burakozcn01/certstream-server-rust"
 license = "MIT"
@@ -12,7 +12,6 @@ axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors"] }
-tower_governor = "0.8"
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"

@@ -18,7 +18,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
-use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -26,7 +25,7 @@ use tracing_subscriber::EnvFilter;
 use config::Config;
 use ct::{fetch_log_list, run_watcher};
 use hot_reload::{ConfigWatcher, HotReloadableConfig};
-use middleware::{auth_middleware, connection_limit_middleware, AuthMiddleware, ConnectionLimiter};
+use middleware::{auth_middleware, AuthMiddleware, ConnectionLimiter};
 use models::{CertificateData, CertificateMessage, ChainCert, LeafCert, PreSerializedMessage, Source};
 use sse::handle_sse_stream;
 use state::StateManager;
@@ -103,7 +102,7 @@ async fn main() {
         )
         .init();
 
-    info!("starting certstream-server-rust v1.0.2");
+    info!("starting certstream-server-rust v1.0.4");
 
     let prometheus_handle = PrometheusBuilder::new()
         .install_recorder()
@@ -112,7 +111,7 @@ async fn main() {
     let (tx, _rx) = broadcast::channel::<Arc<PreSerializedMessage>>(config.buffer_size);
 
     let client = Client::builder()
-        .user_agent("certstream-server-rust/1.0.2")
+        .user_agent("certstream-server-rust/1.0.4")
         .pool_max_idle_per_host(20)
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_nodelay(true)
@@ -127,7 +126,6 @@ async fn main() {
 
     if config.hot_reload.enabled {
         let initial_hot_config = HotReloadableConfig {
-            rate_limit: config.rate_limit.clone(),
             connection_limit: config.connection_limit.clone(),
             auth: config.auth.clone(),
         };
@@ -174,12 +172,15 @@ async fn main() {
         }
     }
 
+    let connection_limiter = ConnectionLimiter::new(config.connection_limit.clone());
+
     if protocols.tcp {
         let tcp_port = protocols.tcp_port.unwrap_or(port + 1);
         let tcp_addr = SocketAddr::from((host, tcp_port));
         let tcp_tx = tx.clone();
+        let tcp_limiter = connection_limiter.clone();
         tokio::spawn(async move {
-            run_tcp_server(tcp_addr, tcp_tx).await;
+            run_tcp_server(tcp_addr, tcp_tx, tcp_limiter).await;
         });
         info!(port = tcp_port, "TCP protocol enabled");
     }
@@ -187,18 +188,22 @@ async fn main() {
     let state = Arc::new(AppState {
         tx: tx.clone(),
         connections: ConnectionCounter::new(),
+        limiter: connection_limiter.clone(),
     });
-
-    let connection_limiter = ConnectionLimiter::new(config.connection_limit.clone());
     let auth_middleware_state = Arc::new(AuthMiddleware::new(&config.auth));
 
-    let mut app = Router::new()
-        .route("/health", get(health))
-        .route("/example.json", get(example_json));
+    let mut app = Router::new();
+
+    if protocols.health {
+        app = app.route("/health", get(health));
+    }
+
+    if protocols.example_json {
+        app = app.route("/example.json", get(example_json));
+    }
 
     if protocols.metrics {
         app = app.route("/metrics", get(move || async move { prometheus_handle.render() }));
-        info!("Metrics endpoint enabled");
     }
 
     if protocols.websocket {
@@ -226,37 +231,15 @@ async fn main() {
         app
     };
 
-    let app = if config.rate_limit.enabled {
-        let governor_conf = GovernorConfigBuilder::default()
-            .per_second(config.rate_limit.per_second)
-            .burst_size(config.rate_limit.burst_size)
-            .finish()
-            .expect("failed to build rate limit config");
-        info!(
-            per_second = config.rate_limit.per_second,
-            burst_size = config.rate_limit.burst_size,
-            "rate limiting enabled"
-        );
-        app.layer(GovernorLayer::new(governor_conf))
-    } else {
-        app
-    };
-
     let app = app.layer(CorsLayer::permissive());
 
-    let app = if config.connection_limit.enabled {
+    if config.connection_limit.enabled {
         info!(
             max_connections = config.connection_limit.max_connections,
             per_ip_limit = ?config.connection_limit.per_ip_limit,
             "connection limiting enabled"
         );
-        app.layer(axum_middleware::from_fn_with_state(
-            connection_limiter,
-            connection_limit_middleware,
-        ))
-    } else {
-        app
-    };
+    }
 
     let addr = SocketAddr::from((host, port));
     info!(address = %addr, "starting server");

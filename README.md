@@ -6,7 +6,7 @@ Certstream server written in Rust. Streams SSL/TLS certificates from Certificate
 [![Docker Image Size](https://img.shields.io/docker/image-size/reloading01/certstream-server-rust/latest)](https://hub.docker.com/r/reloading01/certstream-server-rust)
 [![Rust](https://img.shields.io/badge/rust-1.86%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Docs](https://img.shields.io/badge/docs-website-blue.svg)](https://burakozcn01.github.io/certstream-server-rust/)
+[![Docs](https://img.shields.io/badge/docs-certstream.dev-blue.svg)](https://certstream.dev/)
 
 ## What is Certstream?
 
@@ -25,18 +25,22 @@ Certstream aggregates certificates from Certificate Transparency logs and stream
 - WebSocket, SSE, and raw TCP streaming
 - Pre-serialized messages (serialize once, broadcast to all)
 - Works with existing certstream clients
-- Prometheus metrics
+- Prometheus metrics endpoint
 - TLS support
 - 60+ CT logs monitored
+- State persistence (resume from last position after restart)
+- Connection limiting (max total and per-IP)
+- Token authentication (Bearer token based)
+- Hot reload (config changes without restart)
+- CT log health management (automatic retry, circuit breaker)
 
-### v1.0.3 New Features
+## Documentation
 
-- **State Persistence**: Resume from last position after restart
-- **Rate Limiting**: Configurable requests per second with burst
-- **Connection Limiting**: Max total and per-IP connections
-- **Token Authentication**: Bearer token based auth
-- **Hot Reload**: Config changes without restart
-- **CT Log Health**: Automatic retry, circuit breaker, health checks
+Visit **[certstream.dev](https://certstream.dev/)** for:
+- Live demo and real-time testing
+- Detailed API documentation
+- Hosted service (free tier available)
+- Client examples and integration guides
 
 ## Quick Start
 
@@ -66,7 +70,6 @@ docker run -d \
   -e CERTSTREAM_CT_LOG_STATE_FILE=/data/state.json \
   -e CERTSTREAM_SSE_ENABLED=true \
   -e CERTSTREAM_TCP_ENABLED=true \
-  -e CERTSTREAM_RATE_LIMIT_ENABLED=true \
   -e CERTSTREAM_CONNECTION_LIMIT_ENABLED=true \
   reloading01/certstream-server-rust:latest
 ```
@@ -88,14 +91,9 @@ docker run -d \
 | `CERTSTREAM_SSE_ENABLED` | false | Enable SSE |
 | `CERTSTREAM_TCP_ENABLED` | false | Enable TCP |
 | `CERTSTREAM_TCP_PORT` | 8081 | TCP port |
-
-**Rate Limiting**
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CERTSTREAM_RATE_LIMIT_ENABLED` | false | Enable rate limiting |
-| `CERTSTREAM_RATE_LIMIT_PER_SECOND` | 10 | Requests per second |
-| `CERTSTREAM_RATE_LIMIT_BURST_SIZE` | 20 | Burst allowance |
+| `CERTSTREAM_METRICS_ENABLED` | true | Enable /metrics endpoint |
+| `CERTSTREAM_HEALTH_ENABLED` | true | Enable /health endpoint |
+| `CERTSTREAM_EXAMPLE_JSON_ENABLED` | true | Enable /example.json endpoint |
 
 **Connection Limiting**
 
@@ -174,126 +172,15 @@ Connect to port `8081`. Send `f` for full, `d` for domains, or nothing for lite.
 | `/metrics` | Prometheus metrics |
 | `/example.json` | Example message |
 
-## Client Examples
-
-See [examples/](examples/) directory for demo scripts.
-
-### Python
-
-```bash
-pip install certstream
-```
-
-```python
-import certstream
-
-def callback(message, context):
-    if message['message_type'] == 'certificate_update':
-        domains = message['data']['leaf_cert']['all_domains']
-        print(domains)
-
-certstream.listen_for_events(callback, url='ws://localhost:8080/')
-```
-
-### JavaScript
-
-```javascript
-const WebSocket = require('ws');
-const ws = new WebSocket('ws://localhost:8080/');
-
-ws.on('message', (data) => {
-    const msg = JSON.parse(data);
-    if (msg.message_type === 'certificate_update') {
-        console.log(msg.data.leaf_cert.all_domains);
-    }
-});
-```
-
-### Go
-
-```go
-import "github.com/CaliDog/certstream-go"
-
-stream, _ := certstream.CertStreamEventStream(false)
-for event := range stream {
-    fmt.Println(event.Data.LeafCert.AllDomains)
-}
-```
-
-### With Authentication
-
-```bash
-# WebSocket with token
-wscat -c ws://localhost:8080/ -H "Authorization: Bearer your-token"
-
-# SSE with token
-curl -H "Authorization: Bearer your-token" http://localhost:8080/sse
-```
-
-## Configuration
-
-### YAML
-
-```yaml
-host: "0.0.0.0"
-port: 8080
-log_level: "info"
-buffer_size: 1000
-ct_logs_url: "https://www.gstatic.com/ct/log_list/v3/all_logs_list.json"
-
-protocols:
-  websocket: true
-  sse: true
-  tcp: true
-  tcp_port: 8081
-
-ct_log:
-  state_file: "/data/state.json"
-  batch_size: 256
-  poll_interval_ms: 500
-  retry_max_attempts: 3
-  request_timeout_secs: 30
-
-rate_limit:
-  enabled: true
-  per_second: 10
-  burst_size: 20
-
-connection_limit:
-  enabled: true
-  max_connections: 10000
-  per_ip_limit: 100
-
-auth:
-  enabled: false
-  tokens:
-    - "secret-token-1"
-    - "secret-token-2"
-  header_name: "Authorization"
-
-hot_reload:
-  enabled: true
-
-custom_logs:
-  - name: "My Custom CT Log"
-    url: "https://ct.example.com/log"
-```
-
-Config search order:
-1. `CERTSTREAM_CONFIG` env var
-2. `./config.yaml`
-3. `./config.yml`
-4. `/etc/certstream/config.yaml`
-
 ## Performance
 
-Load tested with 1,000 concurrent WebSocket clients (same machine, same conditions):
+Load tested with 500 concurrent WebSocket clients (same machine, same conditions):
 
 | Metric | Rust | Go |
 |--------|------|-----|
-| Memory (idle) | ~12 MB | ~100 MB |
+| Memory (idle) | ~26 MB | ~100 MB |
 | Memory (avg under load) | 22 MB | 254 MB |
-| CPU (avg under load) | ~15% | ~34% |
+| CPU (avg under load) | ~29% | ~76% |
 | Latency (avg) | 3.4ms | 31ms |
 | Latency (min) | 0.16ms | 1.7ms |
 | Throughput | 677K msg | 267K msg |

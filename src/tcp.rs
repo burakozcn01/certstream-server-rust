@@ -6,6 +6,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
+use crate::middleware::ConnectionLimiter;
 use crate::models::PreSerializedMessage;
 
 static TCP_CONNECTION_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -14,6 +15,7 @@ static NEWLINE: &[u8] = b"\n";
 pub async fn run_tcp_server(
     addr: SocketAddr,
     tx: broadcast::Sender<Arc<PreSerializedMessage>>,
+    limiter: Arc<ConnectionLimiter>,
 ) {
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -28,9 +30,17 @@ pub async fn run_tcp_server(
     loop {
         match listener.accept().await {
             Ok((socket, peer_addr)) => {
+                let ip = peer_addr.ip();
+                if !limiter.try_acquire(ip) {
+                    warn!(peer = %peer_addr, "TCP connection rejected: limit exceeded");
+                    drop(socket);
+                    continue;
+                }
+
                 let rx = tx.subscribe();
+                let limiter_clone = limiter.clone();
                 tokio::spawn(async move {
-                    handle_tcp_client(socket, rx, peer_addr).await;
+                    handle_tcp_client(socket, rx, peer_addr, limiter_clone).await;
                 });
             }
             Err(e) => {
@@ -44,6 +54,7 @@ async fn handle_tcp_client(
     mut socket: TcpStream,
     mut rx: broadcast::Receiver<Arc<PreSerializedMessage>>,
     peer_addr: SocketAddr,
+    limiter: Arc<ConnectionLimiter>,
 ) {
     TCP_CONNECTION_COUNT.fetch_add(1, Ordering::Relaxed);
     update_tcp_metrics();
@@ -95,6 +106,7 @@ async fn handle_tcp_client(
         }
     }
 
+    limiter.release(peer_addr.ip());
     TCP_CONNECTION_COUNT.fetch_sub(1, Ordering::Relaxed);
     update_tcp_metrics();
 

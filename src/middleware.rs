@@ -1,12 +1,12 @@
 use axum::{
     body::Body,
-    extract::{ConnectInfo, Request, State},
+    extract::{Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use dashmap::DashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
@@ -148,24 +148,4 @@ pub async fn auth_middleware(
     }
 }
 
-pub async fn connection_limit_middleware(
-    State(limiter): State<Arc<ConnectionLimiter>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
-    if !limiter.try_acquire(addr.ip()) {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            "Connection limit exceeded",
-        )
-            .into_response();
-    }
-
-    let response = next.run(request).await;
-
-    limiter.release(addr.ip());
-
-    response
-}
 
