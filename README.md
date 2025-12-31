@@ -37,10 +37,9 @@ Certstream aggregates certificates from Certificate Transparency logs and stream
 ## Documentation
 
 Visit **[certstream.dev](https://certstream.dev/)** for:
-- Live demo and real-time testing
 - Detailed API documentation
-- Hosted service (free tier available)
 - Client examples and integration guides
+- Self-hosting guide
 
 ## Quick Start
 
@@ -201,12 +200,6 @@ Monitors 60+ logs including:
 ## Release Notes
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for version history.
-
-## Related
-
-- [certstream-server](https://github.com/CaliDog/certstream-server) - Elixir
-- [certstream-server-go](https://github.com/d-Rickyy-b/certstream-server-go) - Go
-- [certstream-python](https://github.com/CaliDog/certstream-python) - Python client
 
 ## License
 
