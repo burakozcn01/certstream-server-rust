@@ -165,6 +165,22 @@ pub struct CtLogConfig {
     /// whitespace, or punctuation. Empty map means every operator uses the default.
     #[serde(default)]
     pub operator_rate_limits: std::collections::HashMap<String, u64>,
+    /// HTTP User-Agent for outbound requests. Some CT log operators (e.g.
+    /// Geomys) apply a more generous rate limit tier to clients that include
+    /// a contact email. Unset or blank falls back to the compiled-in
+    /// `certstream-server-rust/{VERSION}`; read this through
+    /// [`CtLogConfig::user_agent_override`] rather than directly.
+    #[serde(default)]
+    pub user_agent: Option<String>,
+    /// Operators whose watchers fetch over a dedicated HTTP/1.1-only client.
+    /// DigiCert throttles per TCP connection rather than per IP; under HTTP/2
+    /// reqwest multiplexes every request for a host onto one connection, so
+    /// that per-connection quota becomes a whole-process quota. HTTP/1.1
+    /// spreads the same request rate — still capped by the per-operator
+    /// limiter — over one connection per in-flight fetch. Names are
+    /// canonicalized with the same rules as `operator_rate_limits`.
+    #[serde(default)]
+    pub force_http1_operators: Vec<String>,
     /// Per-catalog-source runtime-authority overrides. Keys are the catalog
     /// registry source names (`google_v3_usable`, `google_v3_all`, `apple`).
     /// An override can only grant authority to a source that currently verifies;
@@ -199,6 +215,20 @@ impl std::str::FromStr for CheckpointSignatureMode {
     }
 }
 
+impl CtLogConfig {
+    /// The configured User-Agent with surrounding whitespace trimmed, or
+    /// `None` when unset or blank. A blank value is treated as unset because
+    /// `CERTSTREAM_USER_AGENT=` in a compose file or `.env` reads back as an
+    /// empty string, and an empty `User-Agent:` header is exactly the opposite
+    /// of what an operator setting this is asking for.
+    pub fn user_agent_override(&self) -> Option<&str> {
+        self.user_agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|ua| !ua.is_empty())
+    }
+}
+
 impl Default for CtLogConfig {
     fn default() -> Self {
         Self {
@@ -219,12 +249,24 @@ impl Default for CtLogConfig {
             static_ct_enabled: true,
             default_operator_rate_limit_ms: default_operator_rate_limit_ms(),
             operator_rate_limits: std::collections::HashMap::new(),
+            user_agent: None,
+            force_http1_operators: Vec::new(),
             catalog_authority_overrides: std::collections::HashMap::new(),
         }
     }
 }
 
 pub const MAX_START_OVERLAP_LEAVES: u64 = 100_000;
+
+/// Split a comma-separated env value into operator names, dropping blanks so
+/// `"digicert,"` and `"digicert, ,geomys"` behave like the obvious YAML list.
+fn parse_operator_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
 
 fn default_operator_rate_limit_ms() -> u64 {
     500
@@ -586,6 +628,10 @@ impl Config {
             ct_log.checkpoint_signature_mode,
             "CERTSTREAM_STATIC_CT_CHECKPOINT_SIGNATURE"
         );
+        env_override!(ct_log.user_agent, "CERTSTREAM_USER_AGENT", some_str);
+        if let Ok(v) = env::var("CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS") {
+            ct_log.force_http1_operators = parse_operator_list(&v);
+        }
 
         let mut connection_limit = yaml_config.connection_limit.unwrap_or_default();
         env_override!(connection_limit.enabled, "CERTSTREAM_CONNECTION_LIMIT_ENABLED");
@@ -706,6 +752,14 @@ impl Config {
                 message: "Fetch concurrency must be between 1 and 16".to_string(),
             });
         }
+        if let Some(ua) = self.ct_log.user_agent_override()
+            && reqwest::header::HeaderValue::try_from(ua).is_err()
+        {
+            errors.push(ConfigValidationError {
+                field: "ct_log.user_agent".to_string(),
+                message: "User-Agent must be a valid HTTP header value".to_string(),
+            });
+        }
 
         if errors.is_empty() {
             Ok(())
@@ -801,6 +855,96 @@ mod tests {
         assert_eq!(config.start_overlap_leaves, 256);
         assert!(config.rfc6962_enabled);
         assert!(config.static_ct_enabled);
+        assert!(config.user_agent.is_none());
+    }
+
+    #[test]
+    fn test_ct_log_config_deserialize_user_agent() {
+        let yaml = r#"
+user_agent: "certstream-server-rust/1.5.3 (contact@example.com)"
+"#;
+        let config: CtLogConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.user_agent.as_deref(),
+            Some("certstream-server-rust/1.5.3 (contact@example.com)")
+        );
+    }
+
+    #[test]
+    fn test_blank_user_agent_falls_back_to_default() {
+        // `CERTSTREAM_USER_AGENT=` in a compose file reads back as Ok(""), and
+        // an empty User-Agent header is worse than the default one.
+        for blank in ["", "   ", "\t"] {
+            let config = CtLogConfig {
+                user_agent: Some(blank.to_string()),
+                ..CtLogConfig::default()
+            };
+            assert_eq!(config.user_agent_override(), None, "blank: {blank:?}");
+        }
+    }
+
+    #[test]
+    fn test_user_agent_override_is_trimmed() {
+        let config = CtLogConfig {
+            user_agent: Some("  certstream/1.0 (me@example.com)  ".to_string()),
+            ..CtLogConfig::default()
+        };
+        assert_eq!(
+            config.user_agent_override(),
+            Some("certstream/1.0 (me@example.com)")
+        );
+    }
+
+    #[test]
+    fn test_validate_blank_user_agent_is_not_an_error() {
+        let config = Config {
+            ct_log: CtLogConfig {
+                user_agent: Some("  ".to_string()),
+                ..CtLogConfig::default()
+            },
+            ..test_config()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_parse_operator_list_drops_blanks_and_trims() {
+        assert_eq!(
+            parse_operator_list("DigiCert, Geomys"),
+            vec!["DigiCert".to_string(), "Geomys".to_string()]
+        );
+        assert_eq!(
+            parse_operator_list("digicert,, ,geomys,"),
+            vec!["digicert".to_string(), "geomys".to_string()]
+        );
+        assert!(parse_operator_list("").is_empty());
+        assert!(parse_operator_list("  ,  ").is_empty());
+    }
+
+    #[test]
+    fn test_ct_log_config_deserialize_force_http1_operators() {
+        let yaml = r#"
+force_http1_operators:
+  - DigiCert
+  - Geomys
+"#;
+        let config: CtLogConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.force_http1_operators, vec!["DigiCert", "Geomys"]);
+    }
+
+    #[test]
+    fn test_validate_user_agent_invalid_header() {
+        let config = Config {
+            ct_log: CtLogConfig {
+                user_agent: Some("bad\nuser-agent".to_string()),
+                ..CtLogConfig::default()
+            },
+            ..test_config()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.iter().any(|e| e.field == "ct_log.user_agent"));
     }
 
     #[test]

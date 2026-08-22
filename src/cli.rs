@@ -2,6 +2,11 @@ use std::env;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// User-Agent sent on every outbound HTTP request unless `ct_log.user_agent`
+/// overrides it. Built from the package version at compile time so the CT log
+/// fetch client and the TLS-pinned Apple catalog client can never drift apart.
+pub const DEFAULT_USER_AGENT: &str = concat!("certstream-server-rust/", env!("CARGO_PKG_VERSION"));
+
 #[derive(Debug, Clone)]
 pub struct CliArgs {
     pub validate_config: bool,
@@ -45,6 +50,7 @@ impl CliArgs {
         println!("    CERTSTREAM_PORT                Server port (default: 8080)");
         println!("    CERTSTREAM_LOG_LEVEL           Log level (default: info)");
         println!("    CERTSTREAM_BUFFER_SIZE         Broadcast buffer size (default: 1000)");
+        println!("    CERTSTREAM_USER_AGENT          Override the outbound HTTP User-Agent");
         println!();
         println!("For more information, see: https://github.com/reloading01/certstream-server-rust");
     }

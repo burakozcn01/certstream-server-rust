@@ -434,12 +434,13 @@ pub async fn fetch_log_list(
     authority_overrides: &HashMap<String, bool>,
     custom_logs: Vec<CustomCtLog>,
     request_timeout: Duration,
+    user_agent: &str,
 ) -> Result<Vec<CtLog>, LogListError> {
     // Apple has no detached signature, so it is fetched through a dedicated
     // client that pins the issuer-CA SPKI on top of WebPKI validation. If that
     // client cannot be built, Apple is skipped this cycle rather than fetched
     // unpinned. Apple is non-authoritative, so skipping has no spawn impact.
-    let apple_client = match catalog::build_apple_pinned_client(request_timeout) {
+    let apple_client = match catalog::build_apple_pinned_client(request_timeout, user_agent) {
         Ok(c) => Some(c),
         Err(e) => {
             warn!(error = %e, "failed to build TLS-pinned Apple client; skipping the Apple catalog this cycle");

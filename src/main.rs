@@ -21,12 +21,12 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any as CorsAny, CorsLayer};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use api::{ApiState, CertificateCache, LogTracker, ServerStats};
-use cli::{CliArgs, VERSION};
-use config::Config;
+use cli::{CliArgs, DEFAULT_USER_AGENT, VERSION};
+use config::{Config, CtLogConfig};
 use ct::{fetch_log_list, WatcherContext};
 use dedup::DedupFilter;
 use health::{deep_health, example_json, health, HealthState};
@@ -140,21 +140,22 @@ async fn main() {
     let tx: broadcast::Sender<Arc<PreSerializedMessage>> =
         broadcast::channel(config.buffer_size).0;
 
-    let client = Client::builder()
-        .user_agent(format!("certstream-server-rust/{}", VERSION))
-        // Pre-1.5.0 kept 20 idle connections per host × 55 hosts = 1100
-        // hot TCP sockets, ~40-55 MiB of kernel + TLS state per process.
-        // Watchers now pipeline up to `fetch_concurrency` range/tile fetches
-        // during catch-up, so keep that many idle connections per host (with
-        // HTTP/2 they multiplex over fewer; this matters for HTTP/1.1 hosts).
-        .pool_max_idle_per_host((config.ct_log.fetch_concurrency as usize).max(2))
-        .pool_idle_timeout(Duration::from_secs(30))
-        // Global timeout for catalog list/signature fetches. Watcher fetches
-        // also set per-request bounds; this backstops shared-client requests.
-        .timeout(Duration::from_secs(config.ct_log.request_timeout_secs))
-        .tcp_nodelay(true)
-        .build()
+    let user_agent = match config.ct_log.user_agent_override() {
+        Some(ua) => {
+            info!(user_agent = ua, "using configured User-Agent");
+            ua.to_string()
+        }
+        None => {
+            if config.ct_log.user_agent.is_some() {
+                warn!("configured User-Agent is blank; falling back to the default");
+            }
+            DEFAULT_USER_AGENT.to_string()
+        }
+    };
+
+    let client = build_ct_client(&config.ct_log, &user_agent, false)
         .expect("failed to build http client");
+    let transport = OperatorTransport::new(&config.ct_log, &user_agent);
 
     let state_manager = StateManager::new(config.ct_log.state_file.clone());
     if config.ct_log.state_file.is_some() {
@@ -251,7 +252,7 @@ async fn main() {
         };
 
         let (rfc_count, static_count) =
-            discover_and_spawn(&config, &log_tracker, &watcher_ctx).await;
+            discover_and_spawn(&config, &log_tracker, &watcher_ctx, &transport).await;
 
         if rfc_count == 0 && static_count == 0 {
             error!("no CT log watchers were started — refusing to run with zero sources");
@@ -384,11 +385,118 @@ fn spawn_signal_handler(shutdown_token: CancellationToken) {
     });
 }
 
+/// Build a CT-fetch HTTP client. `http1_only` yields the transport used by the
+/// operators listed in `ct_log.force_http1_operators`.
+fn build_ct_client(
+    ct_log: &CtLogConfig,
+    user_agent: &str,
+    http1_only: bool,
+) -> reqwest::Result<Client> {
+    let builder = Client::builder()
+        .user_agent(user_agent)
+        // Pre-1.5.0 kept 20 idle connections per host × 55 hosts = 1100
+        // hot TCP sockets, ~40-55 MiB of kernel + TLS state per process.
+        // Watchers now pipeline up to `fetch_concurrency` range/tile fetches
+        // during catch-up, so keep that many idle connections per host (with
+        // HTTP/2 they multiplex over fewer; this matters for HTTP/1.1 hosts).
+        .pool_max_idle_per_host((ct_log.fetch_concurrency as usize).max(2))
+        .pool_idle_timeout(Duration::from_secs(30))
+        // Global timeout for catalog list/signature fetches. Watcher fetches
+        // also set per-request bounds; this backstops shared-client requests.
+        .timeout(Duration::from_secs(ct_log.request_timeout_secs))
+        .tcp_nodelay(true);
+    if http1_only {
+        builder.http1_only().build()
+    } else {
+        builder.build()
+    }
+}
+
+/// Per-operator transport selection.
+///
+/// DigiCert throttles per TCP connection rather than per IP. Under HTTP/2
+/// reqwest multiplexes every watcher's request for a host onto one connection,
+/// so that per-connection quota caps the whole process — and DigiCert serves
+/// several logs from one host, so their watchers all land on it. HTTP/1.1 needs
+/// a connection per in-flight request, so each concurrent fetch carries its own
+/// quota (`pool_max_idle_per_host` only decides how many stay warm between
+/// polls). The per-operator token bucket still gates every fetch, so this
+/// redistributes our request rate across connections rather than raising it.
+/// Same observation as certspotter's `digicerthack` branch
+/// (<https://github.com/SSLMate/certspotter/issues/126>), which drops
+/// keep-alives outright instead.
+struct OperatorTransport {
+    /// `None` when no operator is listed, or when the client failed to build.
+    client: Option<Client>,
+    /// Canonicalized operator names that should use `client`.
+    operators: std::collections::HashSet<String>,
+}
+
+impl OperatorTransport {
+    fn new(ct_log: &CtLogConfig, user_agent: &str) -> Self {
+        let operators: std::collections::HashSet<String> = ct_log
+            .force_http1_operators
+            .iter()
+            .map(|op| ct::normalize_operator(op))
+            .collect();
+        if operators.is_empty() {
+            return Self {
+                client: None,
+                operators,
+            };
+        }
+        let client = match build_ct_client(ct_log, user_agent, true) {
+            Ok(c) => {
+                let mut names: Vec<&str> = operators.iter().map(String::as_str).collect();
+                names.sort_unstable();
+                info!(operators = ?names, "forcing HTTP/1.1 transport");
+                Some(c)
+            }
+            Err(e) => {
+                error!(error = %e, "failed to build the HTTP/1.1 client; listed operators stay on the shared client");
+                None
+            }
+        };
+        Self { client, operators }
+    }
+
+    fn uses_http1(&self, operator_key: &str) -> bool {
+        self.client.is_some() && self.operators.contains(operator_key)
+    }
+
+    /// Resolve the client for an already-canonicalized operator name.
+    fn client_for<'a>(&'a self, operator_key: &str, shared: &'a Client) -> &'a Client {
+        match &self.client {
+            Some(client) if self.uses_http1(operator_key) => client,
+            _ => shared,
+        }
+    }
+}
+
+/// Configured operator names that match none of the discovered logs. Both
+/// `operator_rate_limits` and `force_http1_operators` are looked up by
+/// canonicalized name, so a key that never matches is silently inert — which
+/// from the outside looks exactly like a working config.
+fn unmatched_operator_keys<'a>(
+    configured: impl IntoIterator<Item = &'a String>,
+    known: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut missing: Vec<String> = configured
+        .into_iter()
+        .filter(|key| !known.contains(&ct::normalize_operator(key)))
+        .cloned()
+        .collect();
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
 /// Discovery + spawn pipeline. Returns `(rfc6962_count, static_ct_count)`.
 async fn discover_and_spawn(
     config: &Config,
     log_tracker: &Arc<LogTracker>,
     ctx: &WatcherContext,
+    transport: &OperatorTransport,
 ) -> (usize, usize) {
     use std::collections::HashMap;
     use ct::{LogType, OperatorRateLimiter};
@@ -401,6 +509,7 @@ async fn discover_and_spawn(
         &config.ct_log.catalog_authority_overrides,
         config.custom_logs.clone(),
         Duration::from_secs(config.ct_log.request_timeout_secs),
+        ctx.config.user_agent_override().unwrap_or(DEFAULT_USER_AGENT),
     )
     .await;
 
@@ -460,6 +569,29 @@ async fn discover_and_spawn(
         }
     }
 
+    let known_operators: std::collections::HashSet<String> = all_logs
+        .iter()
+        .map(|log| ct::normalize_operator(&log.operator))
+        .collect();
+    for (field, unmatched) in [
+        (
+            "ct_log.operator_rate_limits",
+            unmatched_operator_keys(config.ct_log.operator_rate_limits.keys(), &known_operators),
+        ),
+        (
+            "ct_log.force_http1_operators",
+            unmatched_operator_keys(&config.ct_log.force_http1_operators, &known_operators),
+        ),
+    ] {
+        if !unmatched.is_empty() {
+            warn!(
+                field,
+                unmatched = ?unmatched,
+                "configured operator names match no discovered CT log operator and have no effect"
+            );
+        }
+    }
+
     // Partition by type — the two watcher pools differ in protocol.
     let (rfc_logs, static_logs): (Vec<_>, Vec<_>) =
         all_logs.into_iter().partition(|l| l.log_type == LogType::Rfc6962);
@@ -472,6 +604,7 @@ async fn discover_and_spawn(
         rfc_logs,
         log_tracker,
         ctx,
+        transport,
         &mut operator_limiters,
         "certstream_ct_logs_count",
         50,
@@ -484,6 +617,7 @@ async fn discover_and_spawn(
         static_logs,
         log_tracker,
         ctx,
+        transport,
         &mut operator_limiters,
         "certstream_static_ct_logs_count",
         100,
@@ -518,6 +652,7 @@ fn spawn_pool(
     logs: Vec<ct::CtLog>,
     log_tracker: &Arc<LogTracker>,
     ctx: &WatcherContext,
+    transport: &OperatorTransport,
     operator_limiters: &mut std::collections::HashMap<String, ct::OperatorRateLimiter>,
     count_gauge: &'static str,
     startup_stagger_ms: u64,
@@ -560,9 +695,9 @@ fn spawn_pool(
     let count = logs.len();
     for (index, log) in logs.into_iter().enumerate() {
         let mut wctx = ctx.clone();
-        wctx.rate_limiter = operator_limiters
-            .get(&ct::normalize_operator(&log.operator))
-            .cloned();
+        let operator_key = ct::normalize_operator(&log.operator);
+        wctx.rate_limiter = operator_limiters.get(&operator_key).cloned();
+        wctx.client = transport.client_for(&operator_key, &ctx.client).clone();
         // Catalog-discovered logs share the global config. Local custom/static
         // entries with per-log overrides get their own resolved config.
         if log.batch_size.is_some() || log.poll_interval_ms.is_some() {
@@ -921,5 +1056,63 @@ fn print_config_validation(config: &Config) {
             }
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transport_with(operators: &[&str]) -> OperatorTransport {
+        let ct_log = CtLogConfig {
+            force_http1_operators: operators.iter().map(|s| s.to_string()).collect(),
+            ..CtLogConfig::default()
+        };
+        OperatorTransport::new(&ct_log, DEFAULT_USER_AGENT)
+    }
+
+    #[test]
+    fn transport_matches_operators_by_canonical_name() {
+        let transport = transport_with(&["DigiCert, Inc."]);
+        assert!(transport.uses_http1(&ct::normalize_operator("digicert inc")));
+        assert!(transport.uses_http1(&ct::normalize_operator("  DigiCert  Inc  ")));
+        // The catalog-emitted "DigiCert" is a different canonical name than
+        // "DigiCert, Inc." — punctuation collapses, the suffix does not.
+        assert!(!transport.uses_http1(&ct::normalize_operator("DigiCert")));
+        assert!(!transport.uses_http1(&ct::normalize_operator("Google")));
+    }
+
+    #[test]
+    fn transport_without_listed_operators_builds_no_client() {
+        let transport = transport_with(&[]);
+        assert!(transport.client.is_none());
+        assert!(!transport.uses_http1("digicert"));
+    }
+
+    #[test]
+    fn transport_returns_shared_client_for_unlisted_operators() {
+        let transport = transport_with(&["DigiCert"]);
+        let shared = Client::new();
+        assert!(!std::ptr::eq(
+            transport.client_for("digicert", &shared),
+            &shared
+        ));
+        assert!(std::ptr::eq(transport.client_for("google", &shared), &shared));
+    }
+
+    #[test]
+    fn unmatched_operator_keys_reports_only_misses() {
+        let known: std::collections::HashSet<String> =
+            ["digicert", "google"].iter().map(|s| s.to_string()).collect();
+        let configured = vec![
+            "DigiCert".to_string(),
+            "Geomys".to_string(),
+            "sectigo".to_string(),
+        ];
+        assert_eq!(
+            unmatched_operator_keys(&configured, &known),
+            vec!["Geomys".to_string(), "sectigo".to_string()]
+        );
+        assert!(unmatched_operator_keys(std::iter::empty(), &known).is_empty());
     }
 }

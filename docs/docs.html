@@ -495,6 +495,8 @@ docker compose up -d</pre>
                         <tr><td><code>CERTSTREAM_CT_LOG_REQUEST_TIMEOUT_SECS</code></td><td>30</td><td>Request timeout</td></tr>
                         <tr><td><code>CERTSTREAM_CT_LOG_BATCH_SIZE</code></td><td>1024</td><td>Entries requested per get-entries call (servers clamp to their own max)</td></tr>
                         <tr><td><code>CERTSTREAM_CT_LOG_FETCH_CONCURRENCY</code></td><td>4</td><td>Concurrent range/tile fetches per watcher during catch-up (1-16)</td></tr>
+                        <tr><td><code>CERTSTREAM_USER_AGENT</code></td><td>certstream-server-rust/{VERSION}</td><td>User-Agent for all outbound HTTP. Some operators (e.g. Geomys) apply a more generous rate limit tier to clients that include a contact email. Blank falls back to the default.</td></tr>
+                        <tr><td><code>CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS</code></td><td>-</td><td>Comma-separated operators whose watchers fetch over HTTP/1.1 instead of HTTP/2, so each in-flight fetch carries its own per-connection quota (DigiCert)</td></tr>
                         <tr><td><code>CERTSTREAM_STATIC_CT_CHECKPOINT_SIGNATURE</code></td><td>warn</td><td>Checkpoint signature policy: <code>warn</code> or <code>enforce</code></td></tr>
                         <tr><td><code>CERTSTREAM_DEDUP_CAPACITY</code></td><td>200000</td><td>Cross-log dedup capacity</td></tr>
                         <tr><td><code>CERTSTREAM_DEDUP_TTL_SECS</code></td><td>900</td><td>Dedup window (seconds)</td></tr>
@@ -549,6 +551,8 @@ docker compose up -d</pre>
   <span class="str">poll_interval_ms</span>: <span class="var">500</span>
   <span class="str">retry_max_attempts</span>: <span class="var">3</span>
   <span class="str">request_timeout_secs</span>: <span class="var">30</span>
+  <span class="str">user_agent</span>: <span class="str">"certstream-server-rust (security@example.com)"</span>
+  <span class="str">force_http1_operators</span>: [<span class="str">"DigiCert"</span>]
 
 <span class="str">dedup</span>:
   <span class="str">capacity</span>: <span class="var">200000</span>
