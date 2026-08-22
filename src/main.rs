@@ -140,8 +140,14 @@ async fn main() {
     let tx: broadcast::Sender<Arc<PreSerializedMessage>> =
         broadcast::channel(config.buffer_size).0;
 
+    let user_agent = config
+        .ct_log
+        .user_agent
+        .clone()
+        .unwrap_or_else(|| format!("certstream-server-rust/{}", VERSION));
+
     let client = Client::builder()
-        .user_agent(format!("certstream-server-rust/{}", VERSION))
+        .user_agent(&user_agent)
         // Pre-1.5.0 kept 20 idle connections per host × 55 hosts = 1100
         // hot TCP sockets, ~40-55 MiB of kernel + TLS state per process.
         // Watchers now pipeline up to `fetch_concurrency` range/tile fetches

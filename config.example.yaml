@@ -54,6 +54,11 @@ ct_log:
   # any operator absent from operator_rate_limits.
   default_operator_rate_limit_ms: 500
   operator_rate_limits: {}
+  # HTTP User-Agent for CT log fetches. Some operators (e.g. Geomys) apply a
+  # more generous rate limit tier to clients that include a contact email.
+  # When unset, defaults to certstream-server-rust/{VERSION}.
+  # (env: CERTSTREAM_USER_AGENT)
+  user_agent: null
   # Per-catalog-source runtime-authority overrides. Keys are
   # google_v3_usable, google_v3_all, and apple. An override can only grant
   # authority to a source that currently verifies; it cannot promote an

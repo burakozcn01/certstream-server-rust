@@ -45,6 +45,7 @@ impl CliArgs {
         println!("    CERTSTREAM_PORT                Server port (default: 8080)");
         println!("    CERTSTREAM_LOG_LEVEL           Log level (default: info)");
         println!("    CERTSTREAM_BUFFER_SIZE         Broadcast buffer size (default: 1000)");
+        println!("    CERTSTREAM_USER_AGENT          Override HTTP User-Agent for CT log requests");
         println!();
         println!("For more information, see: https://github.com/reloading01/certstream-server-rust");
     }

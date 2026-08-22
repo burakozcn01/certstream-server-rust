@@ -139,6 +139,7 @@ rate_limit:
 | `CERTSTREAM_CT_LOG_REQUEST_TIMEOUT_SECS` | 30 | Request timeout |
 | `CERTSTREAM_CT_LOG_BATCH_SIZE` | 1024 | Entries requested per get-entries call (servers clamp to their own max) |
 | `CERTSTREAM_CT_LOG_FETCH_CONCURRENCY` | 4 | Concurrent range/tile fetches per watcher during catch-up (1-16) |
+| `CERTSTREAM_USER_AGENT` | certstream-server-rust/{VERSION} | HTTP User-Agent for CT log fetches. Some operators (e.g. Geomys) apply a more generous rate limit tier to clients that include a contact email. |
 
 **Hot Reload**
 

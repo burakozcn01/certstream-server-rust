@@ -165,6 +165,12 @@ pub struct CtLogConfig {
     /// whitespace, or punctuation. Empty map means every operator uses the default.
     #[serde(default)]
     pub operator_rate_limits: std::collections::HashMap<String, u64>,
+    /// HTTP User-Agent for CT log fetches. Some CT log operators (e.g.
+    /// Geomys) apply a more generous rate limit tier to clients that include
+    /// a contact email. When unset, defaults to
+    /// `certstream-server-rust/{VERSION}`.
+    #[serde(default)]
+    pub user_agent: Option<String>,
     /// Per-catalog-source runtime-authority overrides. Keys are the catalog
     /// registry source names (`google_v3_usable`, `google_v3_all`, `apple`).
     /// An override can only grant authority to a source that currently verifies;
@@ -219,6 +225,7 @@ impl Default for CtLogConfig {
             static_ct_enabled: true,
             default_operator_rate_limit_ms: default_operator_rate_limit_ms(),
             operator_rate_limits: std::collections::HashMap::new(),
+            user_agent: None,
             catalog_authority_overrides: std::collections::HashMap::new(),
         }
     }
@@ -586,6 +593,7 @@ impl Config {
             ct_log.checkpoint_signature_mode,
             "CERTSTREAM_STATIC_CT_CHECKPOINT_SIGNATURE"
         );
+        env_override!(ct_log.user_agent, "CERTSTREAM_USER_AGENT", some_str);
 
         let mut connection_limit = yaml_config.connection_limit.unwrap_or_default();
         env_override!(connection_limit.enabled, "CERTSTREAM_CONNECTION_LIMIT_ENABLED");
@@ -706,6 +714,14 @@ impl Config {
                 message: "Fetch concurrency must be between 1 and 16".to_string(),
             });
         }
+        if let Some(ua) = &self.ct_log.user_agent
+            && reqwest::header::HeaderValue::try_from(ua.as_str()).is_err()
+        {
+            errors.push(ConfigValidationError {
+                field: "ct_log.user_agent".to_string(),
+                message: "User-Agent must be a valid HTTP header value".to_string(),
+            });
+        }
 
         if errors.is_empty() {
             Ok(())
@@ -801,6 +817,34 @@ mod tests {
         assert_eq!(config.start_overlap_leaves, 256);
         assert!(config.rfc6962_enabled);
         assert!(config.static_ct_enabled);
+        assert!(config.user_agent.is_none());
+    }
+
+    #[test]
+    fn test_ct_log_config_deserialize_user_agent() {
+        let yaml = r#"
+user_agent: "certstream-server-rust/1.5.3 (contact@example.com)"
+"#;
+        let config: CtLogConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.user_agent.as_deref(),
+            Some("certstream-server-rust/1.5.3 (contact@example.com)")
+        );
+    }
+
+    #[test]
+    fn test_validate_user_agent_invalid_header() {
+        let config = Config {
+            ct_log: CtLogConfig {
+                user_agent: Some("bad\nuser-agent".to_string()),
+                ..CtLogConfig::default()
+            },
+            ..test_config()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors.iter().any(|e| e.field == "ct_log.user_agent"));
     }
 
     #[test]
