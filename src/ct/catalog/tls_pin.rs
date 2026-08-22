@@ -118,7 +118,10 @@ impl ServerCertVerifier for PinnedIssuerVerifier {
 /// Build a dedicated reqwest client that pins the Apple issuer-CA SPKI on top of
 /// normal WebPKI validation. Used ONLY for the `apple` catalog fetch. `timeout`
 /// The timeout bounds the fetch so a hung Apple endpoint cannot wedge startup.
-pub fn build_apple_pinned_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
+pub fn build_apple_pinned_client(
+    timeout: std::time::Duration,
+    user_agent: &str,
+) -> Result<reqwest::Client, String> {
     let provider = Arc::new(aws_lc_rs::default_provider());
 
     // Trust roots from the OS store (same source rustls-native-certs feeds the
@@ -152,10 +155,7 @@ pub fn build_apple_pinned_client(timeout: std::time::Duration) -> Result<reqwest
         .with_no_client_auth();
 
     reqwest::Client::builder()
-        .user_agent(concat!(
-            "certstream-server-rust/",
-            env!("CARGO_PKG_VERSION")
-        ))
+        .user_agent(user_agent)
         .use_preconfigured_tls(config)
         .timeout(timeout)
         .build()

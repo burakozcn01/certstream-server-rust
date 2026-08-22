@@ -139,7 +139,20 @@ rate_limit:
 | `CERTSTREAM_CT_LOG_REQUEST_TIMEOUT_SECS` | 30 | Request timeout |
 | `CERTSTREAM_CT_LOG_BATCH_SIZE` | 1024 | Entries requested per get-entries call (servers clamp to their own max) |
 | `CERTSTREAM_CT_LOG_FETCH_CONCURRENCY` | 4 | Concurrent range/tile fetches per watcher during catch-up (1-16) |
-| `CERTSTREAM_USER_AGENT` | certstream-server-rust/{VERSION} | HTTP User-Agent for CT log fetches. Some operators (e.g. Geomys) apply a more generous rate limit tier to clients that include a contact email. |
+| `CERTSTREAM_USER_AGENT` | certstream-server-rust/{VERSION} | User-Agent for all outbound HTTP (CT log fetches and catalog fetches). Some operators (e.g. Geomys) apply a more generous rate limit tier to clients that include a contact email. Blank falls back to the default. |
+| `CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS` | - | Comma-separated operator names whose watchers fetch over HTTP/1.1 instead of HTTP/2 (see below) |
+
+**Forcing HTTP/1.1 per operator**
+
+Some operators (DigiCert) throttle per TCP connection rather than per IP. Under HTTP/2 reqwest multiplexes every request for a host onto a single connection, so that per-connection quota ends up capping the whole process — DigiCert serves several logs from one host (`wyvern.ct.digicert.com`), so their watchers all share it. Listing an operator gives its watchers a dedicated HTTP/1.1 client, where each in-flight fetch needs its own connection and therefore carries its own quota:
+
+```yaml
+ct_log:
+  force_http1_operators:
+    - DigiCert
+```
+
+This does not raise the request rate — the per-operator token bucket (`default_operator_rate_limit_ms`, 500 ms) still gates every fetch. It only spreads the same requests across more connections; `fetch_concurrency` sets how many of those stay warm in the pool between polls. Operator names are matched case-insensitively and ignoring punctuation, the same as `operator_rate_limits`; a name that matches no discovered log is logged as a warning at startup.
 
 **Hot Reload**
 

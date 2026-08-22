@@ -54,11 +54,19 @@ ct_log:
   # any operator absent from operator_rate_limits.
   default_operator_rate_limit_ms: 500
   operator_rate_limits: {}
-  # HTTP User-Agent for CT log fetches. Some operators (e.g. Geomys) apply a
+  # User-Agent for all outbound HTTP. Some operators (e.g. Geomys) apply a
   # more generous rate limit tier to clients that include a contact email.
-  # When unset, defaults to certstream-server-rust/{VERSION}.
+  # Unset or blank defaults to certstream-server-rust/{VERSION}.
   # (env: CERTSTREAM_USER_AGENT)
   user_agent: null
+  # Operators whose watchers fetch over HTTP/1.1 instead of HTTP/2. DigiCert
+  # throttles per TCP connection, and HTTP/2 puts every request for a host on
+  # one connection; under HTTP/1.1 each in-flight fetch needs its own
+  # connection and so carries its own quota. The per-operator rate limiter
+  # still gates every fetch, so this redistributes the request rate rather
+  # than raising it. Names are matched like operator_rate_limits keys.
+  # (env: CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS, comma-separated)
+  force_http1_operators: []
   # Per-catalog-source runtime-authority overrides. Keys are
   # google_v3_usable, google_v3_all, and apple. An override can only grant
   # authority to a source that currently verifies; it cannot promote an
