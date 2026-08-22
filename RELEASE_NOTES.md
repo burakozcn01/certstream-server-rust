@@ -1,3 +1,65 @@
+# Release Notes — v1.5.4
+
+**Release date:** August 22, 2026
+
+Two outbound-HTTP controls for deployments that hit CT log operator rate limits. No wire-format or API changes.
+
+## Configurable User-Agent
+
+`ct_log.user_agent` (env `CERTSTREAM_USER_AGENT`) sets the User-Agent on every outbound request — CT log fetches and catalog fetches alike. Some operators (Geomys) apply a more generous rate limit tier to clients that carry a contact address:
+
+```yaml
+ct_log:
+  user_agent: "certstream-server-rust (security@example.com)"
+```
+
+Unset or blank falls back to `certstream-server-rust/{VERSION}`, so `CERTSTREAM_USER_AGENT=` in a compose file or `.env` cannot silently strip the header; a blank value is logged at startup. A value that is not legal HTTP header content fails config validation before the server binds.
+
+Contributed by Effy Elden (@ineffyble) in #12.
+
+## Per-operator HTTP/1.1 transport
+
+DigiCert throttles per TCP connection rather than per IP. Under HTTP/2 reqwest multiplexes every request for a host onto a single connection, so a per-connection quota ends up capping the whole process — and DigiCert serves several logs from one host (`wyvern.ct.digicert.com` negotiates h2), so all of their watchers share it. Listing an operator gives its watchers a dedicated HTTP/1.1 client, where each in-flight fetch needs its own connection and therefore carries its own quota:
+
+```yaml
+ct_log:
+  force_http1_operators:
+    - DigiCert
+```
+
+Env: `CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS=DigiCert,Geomys`.
+
+This does not raise the outbound request rate. The per-operator token bucket (`default_operator_rate_limit_ms`, 500 ms) still gates every fetch — the same requests are spread across more connections, and `fetch_concurrency` only decides how many of those stay warm in the pool. Operators not listed keep the shared HTTP/2 client.
+
+The observation comes from certspotter's `digicerthack` branch ([SSLMate/certspotter#126](https://github.com/SSLMate/certspotter/issues/126)), which drops keep-alives outright instead.
+
+## Operator name matching
+
+`operator_rate_limits` and `force_http1_operators` are both looked up by canonicalized operator name (case, whitespace and punctuation collapsed). A key matching no discovered log used to be silently inert, which is indistinguishable from a working config until you measure. Startup now names them:
+
+```
+WARN configured operator names match no discovered CT log operator and have no effect field="ct_log.operator_rate_limits" unmatched=["digicert inc"]
+```
+
+## Configuration
+
+| Setting | Old | New |
+| ------- | --: | --: |
+| `ct_log.user_agent` | — | `null` (new; env `CERTSTREAM_USER_AGENT`) |
+| `ct_log.force_http1_operators` | — | `[]` (new; env `CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS`) |
+
+## Tests
+
+262 unit tests (was 251) plus the integration and snapshot suites, unchanged.
+
+## Upgrade
+
+Drop-in — both settings default to the v1.5.3 behaviour.
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.5.4
+```
+
 # Release Notes — v1.5.3
 
 **Release date:** July 18, 2026
