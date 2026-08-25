@@ -326,7 +326,7 @@ jobs:
 
       - name: Install tooling
         if: steps.gate.outputs.run == 'true'
-        run: sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils createrepo-c gnupg
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils createrepo-c gnupg rpm
 
       - name: Import signing key
         if: steps.gate.outputs.run == 'true'
@@ -399,7 +399,16 @@ jobs:
             -abs -o dists/stable/Release.gpg dists/stable/Release
           cd ..
 
-          createrepo_c --update rpm/
+          # Unlike apt, dnf verifies each package individually: signing only the
+          # repository metadata leaves it refusing to install with "the package
+          # is not signed". Sign the packages first, then build the metadata
+          # over the signed files so the checksums match.
+          printf '%%_gpg_name %s\n' "$KEYID" > "$HOME/.rpmmacros"
+          rpmsign --addsign rpm/*.rpm
+          rpm -qpi rpm/*.rpm | grep -i '^Signature' | head -2
+
+          rm -rf rpm/repodata
+          createrepo_c --quiet rpm/
           gpg --batch --yes --local-user "$KEYID" \
             --detach-sign --armor rpm/repodata/repomd.xml
 

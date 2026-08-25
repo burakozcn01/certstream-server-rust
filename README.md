@@ -88,6 +88,7 @@ name=certstream-server-rust
 baseurl=https://reloading01.github.io/packages/rpm
 enabled=1
 gpgcheck=1
+repo_gpgcheck=1
 gpgkey=https://reloading01.github.io/packages/key.gpg
 REPO
 sudo dnf install certstream-server-rust
