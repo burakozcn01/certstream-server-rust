@@ -41,6 +41,18 @@ jobs:
       - name: Run tests
         run: cargo test --release
 
+      # Pushing a tag does not create a release, and the upload steps in the
+      # jobs below need one to exist. Creating it here, once, avoids each of
+      # them racing to create it.
+      - name: Ensure release exists
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 \
+            || gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+                 --title "${GITHUB_REF_NAME}" --generate-notes
+
   docker:
     needs: build
     runs-on: ubuntu-latest
@@ -117,11 +129,23 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl toolchain
+      # Ubuntu's musl-tools cannot build jemalloc for aarch64: its configure
+      # cannot see the atomics through the unprefixed cross wrapper and fails
+      # with "Don't have atomics implemented on this platform". Building inside
+      # Alpine sidesteps it entirely, and it is the same environment the
+      # container image already builds in.
+      - name: Build (musl, inside Alpine)
         if: endsWith(matrix.target, '-musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools musl-dev
+        run: |
+          docker run --rm -v "$PWD":/w -w /w -e CARGO_HOME=/w/.cargo-home \
+            rust:1.95-alpine sh -c \
+            'apk add --no-cache build-base musl-dev && cargo build --release --locked'
+          sudo chown -R "$(id -u):$(id -g)" target .cargo-home
+          mkdir -p "target/${{ matrix.target }}/release"
+          cp target/release/certstream-server-rust "target/${{ matrix.target }}/release/"
 
       - name: Build
+        if: "!endsWith(matrix.target, '-musl')"
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package
@@ -178,14 +202,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install musl toolchain
-        run: sudo apt-get update && sudo apt-get install -y musl-tools musl-dev
-
       - name: Install packaging tools
         run: cargo install cargo-deb cargo-generate-rpm --locked
 
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      # Same jemalloc/musl problem as the binaries job; build in Alpine and
+      # place the result where cargo-deb and cargo-generate-rpm expect it.
+      - name: Build (musl, inside Alpine)
+        run: |
+          docker run --rm -v "$PWD":/w -w /w -e CARGO_HOME=/w/.cargo-home \
+            rust:1.95-alpine sh -c \
+            'apk add --no-cache build-base musl-dev && cargo build --release --locked'
+          sudo chown -R "$(id -u):$(id -g)" target .cargo-home
+          mkdir -p "target/${{ matrix.target }}/release"
+          cp target/release/certstream-server-rust "target/${{ matrix.target }}/release/"
 
       - name: Build .deb
         run: cargo deb --no-build --target ${{ matrix.target }} --output "dist/"
