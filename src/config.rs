@@ -50,6 +50,25 @@ pub struct CustomCtLog {
     pub poll_interval_ms: Option<u64>,
 }
 
+/// Where a static-CT watcher reads the tree head from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TreeSizeSource {
+    /// The signed `/checkpoint` endpoint, as static-ct-api specifies.
+    #[default]
+    Checkpoint,
+    /// RFC 6962 `/ct/v1/get-sth`. For logs that serve tile data but answer
+    /// `/checkpoint` with a 404: TrustAsia's log2026a, log2026b and hetu2027
+    /// do this, and their `get-entries` is slow enough (25-31s for 256 entries
+    /// against under a second from a warm tile) that reading tiles is worth
+    /// giving up the checkpoint for.
+    ///
+    /// Nothing about such a log is cryptographically verifiable on our side:
+    /// there is no signed head to check the tiles against. Only use this for
+    /// logs whose operator has said they serve tiles deliberately.
+    GetSth,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct StaticCtLog {
     pub name: String,
@@ -73,6 +92,16 @@ pub struct StaticCtLog {
     pub batch_size: Option<u64>,
     #[serde(default)]
     pub poll_interval_ms: Option<u64>,
+    /// Where to read the tree head from. Defaults to the signed checkpoint.
+    #[serde(default)]
+    pub tree_size_source: TreeSizeSource,
+    /// Operator this log belongs to. Rate limits are keyed by operator name,
+    /// so getting this right is what keeps several logs from one operator in
+    /// the same bucket (and out of everyone else's). When omitted, an entry
+    /// that replaces a discovered log inherits that log's operator; otherwise
+    /// it falls back to a generic name.
+    #[serde(default)]
+    pub operator: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -959,6 +988,26 @@ static_ct_enabled: false
     }
 
     #[test]
+    fn test_static_log_tree_size_source_parses_and_defaults() {
+        let yaml = r#"
+name: "TrustAsia log2026a"
+url: "https://ct2026-a.trustasia.com/log2026a"
+tree_size_source: get_sth
+"#;
+        let log: StaticCtLog = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(log.tree_size_source, TreeSizeSource::GetSth);
+
+        // Omitting it must keep the signed-checkpoint path: opting out of
+        // verification has to be written down explicitly.
+        let yaml = r#"
+name: "LE Sycamore"
+url: "https://mon.sycamore.ct.letsencrypt.org/2026h1/"
+"#;
+        let log: StaticCtLog = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(log.tree_size_source, TreeSizeSource::Checkpoint);
+    }
+
+    #[test]
     fn test_protocol_config_defaults() {
         let config = ProtocolConfig::default();
         assert!(config.websocket);
@@ -967,6 +1016,19 @@ static_ct_enabled: false
         assert!(config.health);
         assert!(config.example_json);
         assert!(!config.api);
+    }
+
+    #[test]
+    fn test_protocol_config_yaml_omitting_sse_keeps_it_disabled() {
+        // SSE is opt-in, like the REST API. A `protocols:` block that omits
+        // `sse` goes through the serde field default rather than
+        // `ProtocolConfig::default()`; the two are separate code paths, and
+        // the docs claimed SSE was on by default while both of them said
+        // otherwise, so pin the behaviour here.
+        let yaml = "websocket: true\napi: true\n";
+        let config: ProtocolConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.sse);
+        assert!(config.api);
     }
 
     #[test]

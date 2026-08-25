@@ -439,7 +439,7 @@ docker compose up -d</pre>
                     <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
                     <tbody>
                         <tr><td><code>CERTSTREAM_WS_ENABLED</code></td><td>true</td><td>Enable WebSocket</td></tr>
-                        <tr><td><code>CERTSTREAM_SSE_ENABLED</code></td><td>true</td><td>Enable SSE</td></tr>
+                        <tr><td><code>CERTSTREAM_SSE_ENABLED</code></td><td>false</td><td>Enable SSE (opt-in)</td></tr>
                         <tr><td><code>CERTSTREAM_METRICS_ENABLED</code></td><td>true</td><td>Enable /metrics endpoint</td></tr>
                         <tr><td><code>CERTSTREAM_HEALTH_ENABLED</code></td><td>true</td><td>Enable /health endpoint</td></tr>
                         <tr><td><code>CERTSTREAM_EXAMPLE_JSON_ENABLED</code></td><td>true</td><td>Enable /example.json endpoint</td></tr>
@@ -533,7 +533,7 @@ docker compose up -d</pre>
 
 <span class="str">protocols</span>:
   <span class="str">websocket</span>: <span class="var">true</span>
-  <span class="str">sse</span>: <span class="var">true</span>
+  <span class="str">sse</span>: <span class="var">false</span>
   <span class="str">metrics</span>: <span class="var">true</span>
   <span class="str">health</span>: <span class="var">true</span>
   <span class="str">example_json</span>: <span class="var">true</span>

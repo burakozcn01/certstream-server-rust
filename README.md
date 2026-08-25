@@ -15,7 +15,7 @@ This Rust implementation is a drop-in replacement that maintains full compatibil
 
 ### Why Rust?
 
-- Flat resident memory that tracks live usage (jemalloc allocator) — catch-up bursts don't park RSS at the high-water mark, no growth over time
+- Flat resident memory that tracks live usage: ~85 MB steady-state at 420 certs/s, with the allocator tuned so catch-up bursts don't park RSS at the high-water mark (see [Memory](#memory))
 - Keeps pace with live CT issuance: pipelined catch-up fetches with an unchanged per-operator request rate
 - Single shared issuer cache (pre-parsed certs) across all static-CT watchers — no per-log cache duplication, no re-parsing shared intermediates
 - Pre-serialized broadcast via `Arc<PreSerializedMessage>` with zero-copy `Utf8Bytes` Text frames — no per-subscriber JSON re-encoding, no per-subscriber UTF-8 validation
@@ -30,7 +30,7 @@ This Rust implementation is a drop-in replacement that maintains full compatibil
 - Every Chrome- and Apple-trusted Certificate Transparency log monitored across both Google and Apple log lists (Google, Cloudflare, DigiCert, Sectigo, Let's Encrypt, Geomys, IPng Networks, TrustAsia, …)
 - **Static-CT-API support** — checkpoint + tile protocol used by Let's Encrypt's Sycamore/Willow, Cloudflare Raio, IPng Halloumi/Gouda, Geomys Tuscolo, TrustAsia Luoshu and other tiled logs
 - **Tiled-log discovery** — `operators[].tiled_logs[]` auto-merged from Apple + Google lists, deduped by `log_id`
-- Cross-log dedup with tunable capacity/TTL (defaults 200K entries / 15-minute window)
+- Cross-log dedup with an enforced capacity and TTL (defaults 200K entries / 15-minute window)
 - Runtime kill switches per protocol family: `CERTSTREAM_RFC6962_ENABLED`, `CERTSTREAM_STATIC_CT_ENABLED`
 - State persistence - resume from last position after restart
 - Connection limiting - protect against abuse with per-IP and total limits
@@ -79,7 +79,7 @@ docker run -d \
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CERTSTREAM_WS_ENABLED` | true | Enable WebSocket |
-| `CERTSTREAM_SSE_ENABLED` | true | Enable SSE |
+| `CERTSTREAM_SSE_ENABLED` | false | Enable SSE (opt-in, like the REST API) |
 | `CERTSTREAM_METRICS_ENABLED` | true | Enable /metrics endpoint |
 | `CERTSTREAM_HEALTH_ENABLED` | true | Enable /health endpoint |
 | `CERTSTREAM_EXAMPLE_JSON_ENABLED` | true | Enable /example.json endpoint |
@@ -129,6 +129,33 @@ rate_limit:
   window_max_requests: 1000
   burst_window_seconds: 10
 ```
+
+**Hybrid tile fetching for logs without a checkpoint**
+
+Some RFC 6962 logs serve static-CT tile data but answer `/checkpoint` with a 404. TrustAsia's `log2026a`, `log2026b` and `hetu2027` are the current examples, and their `get-entries` is slow enough to matter: 25-31 seconds for 256 entries, against under a second for the same entries from a warm tile. Left on the RFC 6962 path they fall steadily behind, by hundreds of thousands of entries over a few hours.
+
+`tree_size_source: get_sth` reads the tree head from `/ct/v1/get-sth` and the entries from `/tile/data`:
+
+```yaml
+static_logs:
+  - name: "TrustAsia log2026a"
+    url: "https://ct2026-a.trustasia.com/log2026a"
+    expected_log_id: "dNudWPfUfp39eHoWKpkcGM9pjafHKZGMmhiwRQ26RLw="
+    tree_size_source: get_sth
+```
+
+The entry replaces the catalog-discovered RFC 6962 watcher for the same `log_id`, so the log is fetched once, over tiles.
+
+Three things to know before enabling it. There is no checkpoint, so nothing about these logs is verifiable on our side and they are ingested unverified; the server logs a warning at startup saying so. The head is held at the last full tile, because a log that publishes no checkpoint is not obliged to serve partial tiles and these do not, so the newest 0-255 entries wait for their tile to fill.
+
+And busy logs need more in-flight fetches than the default. Tiles near the head miss the CDN cache and take seconds each, so `fetch_concurrency: 4` caps a watcher at roughly 50 entries/s. Measured across TrustAsia's three logs: 4 gave ~50 entries/s in total, 16 gave ~276 entries/s, which is enough for two of the three to reach zero lag and hold it.
+
+```yaml
+ct_log:
+  fetch_concurrency: 16
+```
+
+An override that replaces a discovered log inherits that log's operator name, so it lands in the same rate-limit bucket as the operator's other logs. For a log that exists in no catalog, name the operator yourself with `operator:`, otherwise it shares a generic bucket with every other unattributed local entry.
 
 **CT Log Settings**
 
@@ -194,6 +221,27 @@ docker compose up -d
 | `/health/deep` | Detailed health with log status, connections, uptime (JSON) |
 | `/metrics` | Prometheus metrics |
 | `/example.json` | Example message |
+
+### Memory
+
+Steady state is roughly 85 MB resident at 420 certs/s across all 45 trusted logs, against a live heap of ~50 MB. The rest is allocator working set.
+
+The binary ships jemalloc defaults tuned for this workload: `thp:never,narenas:4,background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000`. `thp:never` matters most. On a host running transparent huge pages in `always` mode the kernel promotes jemalloc's 4 KiB pages into 2 MiB ones, and a partly-free huge page cannot be returned, so RSS parks at several times the live heap (measured: 358 MB resident, 206 MB of it `AnonHugePages`). Check your host with:
+
+```bash
+cat /sys/kernel/mm/transparent_hugepage/enabled
+```
+
+Override any of it without rebuilding, for example to trade memory for less purge CPU:
+
+```bash
+docker run -e _RJEM_MALLOC_CONF=dirty_decay_ms:30000,muzzy_decay_ms:30000 \
+  ghcr.io/reloading01/certstream-server-rust:latest
+```
+
+`/metrics` exposes the allocator's own view. `certstream_jemalloc_allocated_bytes` is the live heap and `certstream_jemalloc_resident_bytes` is what the process pays for: a gap between them is allocator behaviour, growth in `allocated` is the application holding data.
+
+Dedup is the largest single consumer that scales with traffic. Its steady-state size is ingest rate × TTL, bounded by `dedup.capacity`: at 420 certs/s a 15-minute window wants ~354K entries, so the default 200K cap binds and the effective window narrows to keep it. `certstream_dedup_effective_ttl_seconds` reports the window actually in force. Raise `dedup.capacity` to buy deeper cross-log dedup at roughly 100 bytes per entry.
 
 ### REST API
 

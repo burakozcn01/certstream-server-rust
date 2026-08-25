@@ -160,14 +160,21 @@ pub fn broadcast_cert(
     }
 
     if let Some(serialized) = msg.pre_serialize(streams) {
-        let msg_size =
+        // This is what serialization produced, not what went out on the wire.
+        // A single domains-only subscriber still pays for `full` and `lite`
+        // being serialized when those formats are enabled, and the gap between
+        // this counter and `bytes_sent` is exactly that waste: measured at
+        // 26.8 GB serialized against 555 MB actually sent over two hours with
+        // one domains-only subscriber and all three formats enabled.
+        let serialized_size =
             serialized.full.len() + serialized.lite.len() + serialized.domains_only.len();
         let _ = tx.send(serialized);
         stats.messages_sent.fetch_add(1, Ordering::Relaxed);
         stats.certificates_processed.fetch_add(1, Ordering::Relaxed);
         stats
-            .bytes_sent
-            .fetch_add(msg_size as u64, Ordering::Relaxed);
+            .bytes_serialized
+            .fetch_add(serialized_size as u64, Ordering::Relaxed);
+        metrics::counter!("certstream_bytes_serialized_total").increment(serialized_size as u64);
         messages_counter.increment(1);
     }
 }

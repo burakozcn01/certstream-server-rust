@@ -5,6 +5,7 @@ mod ct;
 mod dedup;
 mod health;
 mod hot_reload;
+mod memstats;
 mod middleware;
 mod models;
 mod rate_limit;
@@ -42,11 +43,65 @@ use websocket::{handle_domains_only, handle_full_stream, handle_lite_stream, App
 // tasks every poll. The system allocator (macOS malloc / glibc) keeps those
 // freed pages in per-thread arenas, so RSS settles near the transient
 // high-water mark (~400 MB observed) instead of the ~100-150 MB live heap.
-// jemalloc returns dirty pages to the OS on a ~10 s decay, keeping RSS close
-// to actual usage.
+// jemalloc returns dirty pages to the OS on a decay timer, keeping RSS close
+// to actual usage, but only once configured. See below.
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+// jemalloc defaults, read before main() runs. Every one of these was measured
+// on the live ingest workload (45 CT logs, ~420 certs/s, one subscriber);
+// stock defaults gave 358 MiB RSS against a 52 MiB live heap, these give
+// ~85 MiB.
+//
+//   thp:never
+//     The big one. With transparent huge pages in `always` mode (the default
+//     inside Docker Desktop's VM and on several distros) the kernel promotes
+//     jemalloc's 4 KiB pages into 2 MiB ones. jemalloc frees at 4 KiB
+//     granularity, and a partially-free huge page cannot be returned, so RSS
+//     parks at a multiple of the live heap. Of that 358 MiB, 206 MiB was
+//     AnonHugePages. Hosts running THP in `madvise` mode never saw this,
+//     which is why it went unnoticed.
+//
+//   narenas:4
+//     jemalloc defaults to 4 × logical CPUs, and in a container that reads
+//     the *host* CPU count: 72 arenas on an 18-core machine, each with its
+//     own dirty-page pool and decay clock, for a runtime that only has 4
+//     worker threads. Matching the worker count also halved arena metadata
+//     (11.8 MiB -> 4.8 MiB).
+//
+//   background_thread:true
+//     Decay only advances when an arena is touched. Watcher tasks are bursty,
+//     so idle arenas held dirty pages indefinitely. This gives them a purger
+//     that runs regardless.
+//
+//   dirty_decay_ms / muzzy_decay_ms:5000
+//     Half the 10 s default. Catch-up bursts free multi-MB buffers all at
+//     once; returning them sooner costs a little purge CPU and keeps the
+//     resident curve flat.
+//
+// These are defaults, not policy: jemalloc applies `_RJEM_MALLOC_CONF` from
+// the environment after this symbol, so operators can still override any of
+// it (or all of it) without rebuilding.
+// `#[used]` because nothing in this crate reads the symbol (jemalloc looks it
+// up at startup) and fat LTO would otherwise be free to drop it.
+// `thp` and `background_thread` are Linux-only in jemalloc: macOS has no
+// transparent huge pages at all, and the background purger is documented as
+// pthread-only. Passing them anyway is harmless but makes jemalloc print
+// "No THP support" and "supports pthread only" to stderr on every start,
+// which is noise for anyone running the binary outside a container.
+#[cfg(all(not(target_env = "msvc"), target_os = "linux"))]
+#[used]
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static MALLOC_CONF: &[u8] =
+    b"thp:never,narenas:4,background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000\0";
+
+#[cfg(all(not(target_env = "msvc"), not(target_os = "linux")))]
+#[used]
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static MALLOC_CONF: &[u8] = b"narenas:4,dirty_decay_ms:5000,muzzy_decay_ms:5000\0";
 
 // CT polling + WS broadcast are heavily I/O-bound; CPU work is bursty (JSON
 // parse + cert deserialise) and cheap relative to the network wait. 4 worker
@@ -283,6 +338,7 @@ async fn main() {
                 tokio::select! {
                     _ = heartbeat_cancel.cancelled() => break,
                     _ = interval.tick() => {
+                        let heap = memstats::record();
                         let processed = stats.certificates_processed.load(Ordering::Relaxed);
                         let sent = stats.messages_sent.load(Ordering::Relaxed);
                         let d_processed = processed.saturating_sub(last_processed);
@@ -295,6 +351,8 @@ async fn main() {
                             broadcast_total = sent,
                             broadcast_delta = d_sent,
                             dedup_cache = dedup.len(),
+                            heap_allocated_mib = heap.map(|h| h.allocated / 1_048_576),
+                            heap_resident_mib = heap.map(|h| h.resident / 1_048_576),
                             "heartbeat"
                         );
                         last_processed = processed;
@@ -524,8 +582,14 @@ async fn discover_and_spawn(
     // Splice in configured static logs by expected CT log ID when provided.
     // A configured static log with the same CT log ID as a discovered log
     // replaces it only if non-replaceable identity fields still agree.
-    let static_overrides: Vec<ct::CtLog> =
+    let mut static_overrides: Vec<ct::CtLog> =
         config.static_logs.iter().cloned().map(ct::CtLog::from).collect();
+
+    // Rate limits are keyed by operator, so an override has to carry the
+    // operator name of the log it replaces rather than the generic one
+    // `From<StaticCtLog>` stamps on every local entry.
+    ct::inherit_operators(&all_logs, &mut static_overrides);
+
     let conflicts = ct::local_override_conflicts(&all_logs, &static_overrides);
     if !conflicts.is_empty() {
         for conflict in &conflicts {
@@ -791,6 +855,7 @@ fn build_router(protocols: &config::ProtocolConfig, config: &Config, deps: Route
         connections: ConnectionCounter::new(),
         limiter: connection_limiter.clone(),
         streams: streams.clone(),
+        stats: server_stats.clone(),
     });
     let auth_middleware_state = Arc::new(AuthMiddleware::new(
         &config.auth,

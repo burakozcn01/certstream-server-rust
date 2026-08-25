@@ -45,7 +45,14 @@ pub struct ConnectionStats {
 pub struct ThroughputStats {
     pub messages_sent: u64,
     pub certificates_processed: u64,
+    /// Bytes actually written to subscribers. Sums the one format each
+    /// subscriber asked for, so it tracks outbound bandwidth.
     pub bytes_sent: u64,
+    /// Bytes produced by serialization, counted once per certificate across
+    /// every enabled stream format. Exceeds `bytes_sent` whenever a format is
+    /// enabled but nobody is subscribed to it, which is the signal to disable
+    /// that format.
+    pub bytes_serialized: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -228,6 +235,16 @@ impl LogTracker {
             entry.tree_size = tree_size;
             entry.total_errors = total_errors;
             entry.last_success = Some(chrono::Utc::now().timestamp());
+
+            // How far behind the log's head we are. `status` only answers
+            // "are requests succeeding", so a log can sit healthy while
+            // falling further behind every poll: on a two-hour run 19 of 45
+            // logs were healthy and more than 5K entries behind, one of them
+            // by 1.3M. Called once per poll per log, so the label clone is
+            // ~45/s in the worst case.
+            let lag = tree_size.saturating_sub(current_index);
+            metrics::gauge!("certstream_ct_log_lag_entries", "log" => entry.name.clone())
+                .set(lag as f64);
         }
     }
 
@@ -273,7 +290,11 @@ pub struct ServerStats {
     pub start_time: Instant,
     pub messages_sent: AtomicU64,
     pub certificates_processed: AtomicU64,
+    /// Written by the WebSocket and SSE senders, which batch their local
+    /// counts before touching this so a fan-out to many subscribers does not
+    /// turn one broadcast into one atomic per subscriber.
     pub bytes_sent: AtomicU64,
+    pub bytes_serialized: AtomicU64,
 }
 
 impl Default for ServerStats {
@@ -289,6 +310,7 @@ impl ServerStats {
             messages_sent: AtomicU64::new(0),
             certificates_processed: AtomicU64::new(0),
             bytes_sent: AtomicU64::new(0),
+            bytes_serialized: AtomicU64::new(0),
         }
     }
 
@@ -317,6 +339,7 @@ pub async fn handle_stats(State(state): State<Arc<ApiState>>) -> Json<StatsRespo
             messages_sent: state.stats.messages_sent.load(Ordering::Relaxed),
             certificates_processed: state.stats.certificates_processed.load(Ordering::Relaxed),
             bytes_sent: state.stats.bytes_sent.load(Ordering::Relaxed),
+            bytes_serialized: state.stats.bytes_serialized.load(Ordering::Relaxed),
         },
         memory: MemoryStats {
             cache_entries: state.cache.len(),

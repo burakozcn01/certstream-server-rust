@@ -1,4 +1,4 @@
-use crate::config::{CustomCtLog, StaticCtLog};
+use crate::config::{CustomCtLog, StaticCtLog, TreeSizeSource};
 use crate::ct::catalog::{self, CatalogFetch, SignedCatalog};
 use crate::ct::normalize::{normalize_log_origin, normalize_operator, normalize_url};
 use futures::future::join_all;
@@ -156,6 +156,10 @@ pub struct CtLog {
     pub batch_size: Option<u64>,
     /// Optional per-log override; `None` means use the global CT config.
     pub poll_interval_ms: Option<u64>,
+    /// Static-CT only: where the watcher reads the tree head from. Catalog
+    /// discovery always yields `Checkpoint`; only a local `static_logs` entry
+    /// can ask for `GetSth`.
+    pub tree_size_source: TreeSizeSource,
     state: Option<LogState>,
 }
 
@@ -193,24 +197,65 @@ impl From<CustomCtLog> for CtLog {
             key: None,
             batch_size: custom.batch_size,
             poll_interval_ms: custom.poll_interval_ms,
+            tree_size_source: TreeSizeSource::default(),
             state: None,
         }
     }
 }
+
+/// Operator name a locally-configured static log carries when it neither
+/// declares one nor inherits one from a discovered log.
+pub const UNATTRIBUTED_STATIC_OPERATOR: &str = "Static CT";
 
 impl From<StaticCtLog> for CtLog {
     fn from(static_log: StaticCtLog) -> Self {
         Self {
             description: static_log.name,
             url: static_log.url,
-            operator: "Static CT".to_string(),
+            operator: static_log
+                .operator
+                .unwrap_or_else(|| UNATTRIBUTED_STATIC_OPERATOR.to_string()),
             log_type: LogType::StaticCt,
             log_origin: static_log.log_origin,
             log_id: static_log.expected_log_id,
             key: static_log.key,
             batch_size: static_log.batch_size,
             poll_interval_ms: static_log.poll_interval_ms,
+            tree_size_source: static_log.tree_size_source,
             state: None,
+        }
+    }
+}
+
+/// Give each override the operator name of the log it replaces.
+///
+/// Outbound rate limits are keyed by operator, and `From<StaticCtLog>` stamps
+/// every local entry with [`UNATTRIBUTED_STATIC_OPERATOR`]. Left alone, all
+/// the overrides for one operator share a single bucket under a name that
+/// matches no `operator_rate_limits` key, while that operator's other logs
+/// sit in their own. An override that declares its own `operator` keeps it,
+/// and one that replaces nothing keeps the generic name.
+pub fn inherit_operators(discovered: &[CtLog], overrides: &mut [CtLog]) {
+    let by_id: HashMap<&str, &str> = discovered
+        .iter()
+        .filter_map(|l| {
+            l.log_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .map(|id| (id, l.operator.as_str()))
+        })
+        .collect();
+
+    for override_log in overrides {
+        if override_log.operator != UNATTRIBUTED_STATIC_OPERATOR {
+            continue;
+        }
+        if let Some(operator) = override_log
+            .log_id
+            .as_deref()
+            .and_then(|id| by_id.get(id))
+        {
+            override_log.operator = (*operator).to_string();
         }
     }
 }
@@ -242,7 +287,16 @@ pub fn local_override_conflicts(discovered: &[CtLog], overrides: &[CtLog]) -> Ve
             continue;
         };
 
-        if override_log.log_type != discovered_log.log_type {
+        // A `get_sth` override deliberately reads an RFC 6962 log over the
+        // tile protocol, so the transports are expected to disagree: that is
+        // the whole point of the mode, and the config had to say so
+        // explicitly. Every other transport mismatch is still a conflict,
+        // since silently switching protocols on a discovered log would change
+        // what is being verified.
+        let deliberate_hybrid = override_log.tree_size_source == TreeSizeSource::GetSth
+            && override_log.log_type == LogType::StaticCt
+            && discovered_log.log_type == LogType::Rfc6962;
+        if override_log.log_type != discovered_log.log_type && !deliberate_hybrid {
             conflicts.push(format!(
                 "override '{}' expected CT log ID {id} has log_type {:?} but discovered log has {:?}",
                 override_log.description, override_log.log_type, discovered_log.log_type
@@ -290,6 +344,7 @@ fn make_test_log(description: &str, url: &str, state: Option<LogState>) -> CtLog
         key: None,
         batch_size: None,
         poll_interval_ms: None,
+        tree_size_source: TreeSizeSource::Checkpoint,
         state,
     }
 }
@@ -366,6 +421,9 @@ fn parse_list(bytes: &[u8], source_name: &str) -> Vec<CtLog> {
                 key: raw.key,
                 batch_size: None,
                 poll_interval_ms: None,
+                // Catalog-discovered logs always carry a signed checkpoint;
+                // only a local override can opt into the get-sth path.
+                tree_size_source: TreeSizeSource::Checkpoint,
                 state: raw.state,
             });
         }
@@ -382,6 +440,9 @@ fn parse_list(bytes: &[u8], source_name: &str) -> Vec<CtLog> {
                 key: raw.key,
                 batch_size: None,
                 poll_interval_ms: None,
+                // Catalog-discovered logs always carry a signed checkpoint;
+                // only a local override can opt into the get-sth path.
+                tree_size_source: TreeSizeSource::Checkpoint,
                 state: raw.state,
             });
         }
@@ -697,6 +758,8 @@ mod tests {
             key: None,
             batch_size: None,
             poll_interval_ms: None,
+            tree_size_source: TreeSizeSource::default(),
+            operator: None,
         };
         let ct_log = CtLog::from(static_log);
         assert_eq!(ct_log.description, "LE Willow 2025h2");
@@ -721,6 +784,8 @@ mod tests {
             key: None,
             batch_size: Some(64),
             poll_interval_ms: Some(3000),
+            tree_size_source: TreeSizeSource::default(),
+            operator: None,
         };
         let ct_log = CtLog::from(static_log);
         assert_eq!(ct_log.log_id.as_deref(), Some("static-log-id"));
@@ -766,6 +831,84 @@ mod tests {
         let mut additive = make_test_log("additive", "https://new.example.com/log", None);
         additive.log_id = Some("logid-y".to_string());
         assert!(local_override_conflicts(&[discovered], &[additive]).is_empty());
+    }
+
+    #[test]
+    fn inherit_operators_takes_the_replaced_logs_operator() {
+        let mut discovered = make_test_log("disc", "https://ct.example.com/log", None);
+        discovered.log_id = Some("logid-x".to_string());
+        discovered.operator = "trustasia".to_string();
+
+        let mut replacing = make_test_log("replacing", "https://ct.example.com/log", None);
+        replacing.log_id = Some("logid-x".to_string());
+        replacing.operator = UNATTRIBUTED_STATIC_OPERATOR.to_string();
+
+        let mut declared = make_test_log("declared", "https://other.example.com/log", None);
+        declared.log_id = Some("logid-x".to_string());
+        declared.operator = "explicit".to_string();
+
+        let mut orphan = make_test_log("orphan", "https://new.example.com/log", None);
+        orphan.log_id = Some("logid-unknown".to_string());
+        orphan.operator = UNATTRIBUTED_STATIC_OPERATOR.to_string();
+
+        let mut overrides = vec![replacing, declared, orphan];
+        inherit_operators(std::slice::from_ref(&discovered), &mut overrides);
+
+        assert_eq!(
+            overrides[0].operator, "trustasia",
+            "an override replacing a discovered log shares its rate-limit bucket"
+        );
+        assert_eq!(
+            overrides[1].operator, "explicit",
+            "a declared operator is never overwritten"
+        );
+        assert_eq!(
+            overrides[2].operator, UNATTRIBUTED_STATIC_OPERATOR,
+            "an override that replaces nothing has no operator to inherit"
+        );
+    }
+
+    #[test]
+    fn local_override_conflicts_allows_deliberate_get_sth_hybrid() {
+        // TrustAsia's log2026a/b and hetu2027 are RFC 6962 in the catalog but
+        // serve tile data, so a `get_sth` override intentionally reads them
+        // over the tile protocol. That transport mismatch is the feature.
+        let mut discovered = make_test_log("disc", "https://ct.example.com/log", None);
+        discovered.log_type = LogType::Rfc6962;
+        discovered.log_id = Some("logid-x".to_string());
+
+        let mut hybrid = make_test_log("hybrid", "https://ct.example.com/log", None);
+        hybrid.log_type = LogType::StaticCt;
+        hybrid.log_id = Some("logid-x".to_string());
+        hybrid.tree_size_source = TreeSizeSource::GetSth;
+        assert!(
+            local_override_conflicts(std::slice::from_ref(&discovered), &[hybrid]).is_empty(),
+            "a declared get_sth override may switch an RFC 6962 log to the tile transport"
+        );
+
+        // Without the declaration it is still the old silent-protocol-switch
+        // conflict.
+        let mut undeclared = make_test_log("undeclared", "https://ct.example.com/log", None);
+        undeclared.log_type = LogType::StaticCt;
+        undeclared.log_id = Some("logid-x".to_string());
+        assert!(
+            !local_override_conflicts(std::slice::from_ref(&discovered), &[undeclared]).is_empty(),
+            "switching transport without tree_size_source: get_sth must still conflict"
+        );
+
+        // The exemption is one-directional: it does not license reading a
+        // tiled log over RFC 6962.
+        let mut reversed = make_test_log("reversed", "https://ct.example.com/log", None);
+        reversed.log_type = LogType::Rfc6962;
+        reversed.log_id = Some("logid-x".to_string());
+        reversed.tree_size_source = TreeSizeSource::GetSth;
+        let mut tiled = make_test_log("tiled-disc", "https://ct.example.com/log", None);
+        tiled.log_type = LogType::StaticCt;
+        tiled.log_id = Some("logid-x".to_string());
+        assert!(
+            !local_override_conflicts(std::slice::from_ref(&tiled), &[reversed]).is_empty(),
+            "get_sth must not excuse an RFC 6962 override of a tiled log"
+        );
     }
 
     #[test]

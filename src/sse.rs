@@ -80,10 +80,16 @@ pub async fn handle_sse_stream(
         "SSE client connected"
     );
 
+    // Outbound bytes for this connection, accumulated here and pushed to the
+    // shared counter in batches by the wrapper. Per-message writes to the
+    // global counter would put every subscriber on the same cache line.
+    let pending_bytes = Arc::new(AtomicU64::new(0));
+    let counter = Arc::clone(&pending_bytes);
+
     let stream = BroadcastStream::new(rx).filter_map(move |result| {
         // stream_type is Copy — captured by value, zero allocation per message.
         std::future::ready(match result {
-            Ok(msg) => process_message(msg, stream_type),
+            Ok(msg) => process_message(msg, stream_type, &counter),
             Err(_) => None,
         })
     });
@@ -92,6 +98,8 @@ pub async fn handle_sse_stream(
         inner: Box::pin(stream),
         limiter: state.limiter.clone(),
         client_ip: ip,
+        stats: state.stats.clone(),
+        pending_bytes,
     };
 
     Sse::new(stream).keep_alive(
@@ -104,12 +112,14 @@ pub async fn handle_sse_stream(
 fn process_message(
     msg: Arc<PreSerializedMessage>,
     stream_type: SseStreamType,
+    pending_bytes: &AtomicU64,
 ) -> Option<Result<Event, std::convert::Infallible>> {
     let text = match stream_type {
         SseStreamType::Full => &msg.full,
         SseStreamType::DomainsOnly => &msg.domains_only,
         SseStreamType::Lite => &msg.lite,
     };
+    pending_bytes.fetch_add(text.len() as u64, Ordering::Relaxed);
 
     // Payloads are pre-validated Utf8Bytes — no per-client UTF-8 scan here.
     // (Event::data still copies into the event's own buffer; that copy is
@@ -121,10 +131,24 @@ struct SseStreamWrapper<S> {
     inner: std::pin::Pin<Box<S>>,
     limiter: Arc<ConnectionLimiter>,
     client_ip: IpAddr,
+    stats: Arc<crate::api::ServerStats>,
+    pending_bytes: Arc<AtomicU64>,
+}
+
+impl<S> SseStreamWrapper<S> {
+    /// Move this connection's accumulated bytes into the shared counter.
+    fn flush_bytes(&self) {
+        let n = self.pending_bytes.swap(0, Ordering::Relaxed);
+        if n > 0 {
+            self.stats.bytes_sent.fetch_add(n, Ordering::Relaxed);
+            metrics::counter!("certstream_bytes_sent_total", "protocol" => "sse").increment(n);
+        }
+    }
 }
 
 impl<S> Drop for SseStreamWrapper<S> {
     fn drop(&mut self) {
+        self.flush_bytes();
         self.limiter.release(self.client_ip);
         SSE_CONNECTION_COUNT.fetch_sub(1, Ordering::Relaxed);
         update_sse_metrics();
@@ -146,7 +170,14 @@ where
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        self.inner.as_mut().poll_next(cx)
+        let polled = self.inner.as_mut().poll_next(cx);
+        // Long-lived connections would otherwise only report their bytes on
+        // disconnect, which for SSE can be hours.
+        const FLUSH_THRESHOLD_BYTES: u64 = 256 * 1024;
+        if self.pending_bytes.load(Ordering::Relaxed) >= FLUSH_THRESHOLD_BYTES {
+            self.flush_bytes();
+        }
+        polled
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "certstream-server-rust"
-version = "1.5.4"
+version = "1.5.5"
 edition = "2024"
 repository = "https://github.com/reloading01/certstream-server-rust"
 license = "MIT"
@@ -86,6 +86,9 @@ p256 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
 # arenas and RSS parks at the high-water mark. Not available on MSVC.
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"
+# Reads the allocator's own counters (allocated / resident / retained) so
+# /metrics can separate live heap from pages jemalloc has yet to return.
+tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
 
 [dev-dependencies]
 rcgen = "0.14"

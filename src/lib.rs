@@ -20,6 +20,8 @@ pub mod state;
 #[doc(hidden)]
 pub mod websocket;
 #[doc(hidden)]
+pub mod memstats;
+#[doc(hidden)]
 pub mod middleware;
 #[doc(hidden)]
 pub mod hot_reload;

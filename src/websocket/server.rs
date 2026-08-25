@@ -37,6 +37,7 @@ pub struct AppState {
     pub connections: ConnectionCounter,
     pub limiter: Arc<ConnectionLimiter>,
     pub streams: Arc<StreamConfig>,
+    pub stats: Arc<crate::api::ServerStats>,
 }
 
 #[derive(Default)]
@@ -161,6 +162,14 @@ async fn handle_socket(
         "WS client connected"
     );
 
+    // Outbound bytes are accumulated per connection and pushed to the shared
+    // counter in batches. Doing it per frame would turn one broadcast into one
+    // atomic write per subscriber, which is the one thing the pre-serialized
+    // fan-out path is built to avoid.
+    let mut pending_bytes: u64 = 0;
+    let mut pending_frames: u32 = 0;
+    const BYTES_FLUSH_FRAMES: u32 = 256;
+
     let mut heartbeat_interval = interval(Duration::from_secs(30));
     let mut ping_interval = interval(Duration::from_secs(15));
     let mut last_pong = std::time::Instant::now();
@@ -251,8 +260,14 @@ async fn handle_socket(
                             StreamType::Lite => msg.lite.clone(),
                             StreamType::DomainsOnly => msg.domains_only.clone(),
                         };
+                        let frame_len = text.len() as u64;
                         if !send_with_deadline(&mut sender, Message::Text(text), WRITE_TIMEOUT).await {
                             break;
+                        }
+                        pending_bytes += frame_len;
+                        pending_frames += 1;
+                        if pending_frames >= BYTES_FLUSH_FRAMES {
+                            flush_bytes_sent(&state, &mut pending_bytes, &mut pending_frames);
                         }
                         consecutive_lags = 0;
                     }
@@ -278,6 +293,7 @@ async fn handle_socket(
         }
     }
 
+    flush_bytes_sent(&state, &mut pending_bytes, &mut pending_frames);
     state.limiter.release(client_ip);
     state.connections.decrement(stream_type);
     info!(
@@ -286,6 +302,21 @@ async fn handle_socket(
         ip = %client_ip,
         "WS client disconnected"
     );
+}
+
+/// Push a connection's accumulated outbound bytes to the shared counter.
+fn flush_bytes_sent(state: &AppState, pending_bytes: &mut u64, pending_frames: &mut u32) {
+    if *pending_bytes == 0 {
+        return;
+    }
+    state
+        .stats
+        .bytes_sent
+        .fetch_add(*pending_bytes, Ordering::Relaxed);
+    metrics::counter!("certstream_bytes_sent_total", "protocol" => "websocket")
+        .increment(*pending_bytes);
+    *pending_bytes = 0;
+    *pending_frames = 0;
 }
 
 #[cfg(test)]

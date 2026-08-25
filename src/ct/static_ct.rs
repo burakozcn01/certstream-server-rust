@@ -18,7 +18,7 @@ use super::{
     CtLog, ParseOptions, WatcherContext, broadcast_cert, build_cached_cert,
     parse_certificate_with_options,
 };
-use crate::config::CheckpointSignatureMode;
+use crate::config::{CheckpointSignatureMode, TreeSizeSource};
 use crate::models::{CertificateData, CertificateMessage, ChainCert, Source};
 
 /// A parsed static CT checkpoint.
@@ -116,8 +116,20 @@ impl IssuerCache {
 
     /// Outer `None` = never fetched (caller should fetch); `Some(None)` =
     /// fetched but unparseable (negative-cached, skip).
+    ///
+    /// Hit/miss is counted here rather than in `fetch_issuer` because the
+    /// tile pre-warm path filters fingerprints through this method directly
+    /// and never reaches `fetch_issuer` on a hit. Counting there reported 13
+    /// hits against 487 misses on a two-hour run, which read as a useless
+    /// cache when nearly every lookup was in fact served.
     pub fn get(&self, fingerprint: &[u8; 32]) -> Option<Option<Arc<ChainCert>>> {
-        self.cache.get(fingerprint)
+        let entry = self.cache.get(fingerprint);
+        if entry.is_some() {
+            metrics::counter!("certstream_issuer_cache_hits").increment(1);
+        } else {
+            metrics::counter!("certstream_issuer_cache_misses").increment(1);
+        }
+        entry
     }
 
     pub fn insert(&self, fingerprint: [u8; 32], cert: Arc<ChainCert>) {
@@ -510,6 +522,77 @@ pub fn fingerprint_hex(fp: &[u8; 32]) -> String {
     s
 }
 
+/// Failure modes of a `get-sth` head probe, split so the caller can back off
+/// on a 429 for as long as the operator asked rather than on its own schedule.
+enum SthError {
+    RateLimited(u64),
+    Other(String),
+}
+
+impl std::fmt::Display for SthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RateLimited(ms) => write!(f, "rate limited, retry after {ms}ms"),
+            Self::Other(e) => f.write_str(e),
+        }
+    }
+}
+
+/// Read the tree head from RFC 6962 `get-sth` instead of `/checkpoint`.
+///
+/// Used only by `TreeSizeSource::GetSth` logs, which serve tile data but
+/// answer `/checkpoint` with a 404. Unlike the checkpoint path there is
+/// nothing to verify here: `get-sth` carries the log's own signature over the
+/// tree head, but we hold no key for these logs and the tiles cannot be
+/// checked against it anyway (their `TimestampedEntry` includes the static-CT
+/// `leaf_index` extension, so re-encoding a tile leaf does not reproduce the
+/// RFC 6962 Merkle leaf hash).
+async fn fetch_sth_tree_size(
+    client: &Client,
+    sth_url: &str,
+    timeout: Duration,
+    log_desc: &str,
+) -> Result<u64, SthError> {
+    #[derive(serde::Deserialize)]
+    struct SthResponse {
+        tree_size: u64,
+    }
+
+    let resp = client
+        .get(sth_url)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|e| SthError::Other(e.to_string()))?;
+
+    let status = resp.status();
+    if status.as_u16() == 429 {
+        return Err(SthError::RateLimited(super::normalize::parse_retry_after(
+            resp.headers(),
+            log_desc,
+        )));
+    }
+    if !status.is_success() {
+        return Err(SthError::Other(format!("get-sth returned {status}")));
+    }
+
+    resp.json::<SthResponse>()
+        .await
+        .map(|sth| sth.tree_size)
+        .map_err(|e| SthError::Other(format!("failed to parse get-sth: {e}")))
+}
+
+/// Round a head size down to the last full tile.
+///
+/// static-ct-api only requires partial tiles (`.p/<W>`) for tree sizes that a
+/// checkpoint was published for, so a log that publishes no checkpoint owes
+/// none, and TrustAsia's tiled logs serve only full tiles. Asking for a
+/// partial one gets a 404, so the head is held at the last full tile and the
+/// remaining entries arrive once that tile fills.
+fn full_tile_floor(tree_size: u64) -> u64 {
+    (tree_size / 256) * 256
+}
+
 /// Issue #10: `fingerprint` is used directly as the cache key — no hex String on cache hit.
 /// Only on a cache miss do we compute the hex string for the HTTP URL.
 ///
@@ -525,12 +608,15 @@ pub async fn fetch_issuer(
 ) -> Option<Arc<ChainCert>> {
     // Zero-alloc cache hit path: [u8; 32] key copied directly from stack.
     // A negative entry (Some(None)) is also a hit — known-unparseable.
+    // `IssuerCache::get` records the hit/miss.
     if let Some(cached) = cache.get(fingerprint) {
-        metrics::counter!("certstream_issuer_cache_hits").increment(1);
         return cached;
     }
 
-    metrics::counter!("certstream_issuer_cache_misses").increment(1);
+    // Distinct from a cache miss: this counts issuers we actually go to the
+    // network for, which a miss does not imply (the pre-warm path dedupes
+    // fingerprints before fetching).
+    metrics::counter!("certstream_issuer_fetch_attempts").increment(1);
 
     // Cache miss: only now do we pay for the hex string (needed for the URL).
     let hex = fingerprint_hex(fingerprint);
@@ -726,6 +812,14 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
     info!(log = %log_name, url = %base_url, "starting static CT watcher");
 
     let checkpoint_url = format!("{}/checkpoint", base_url);
+    let sth_url = format!("{}/ct/v1/get-sth", base_url);
+    let tree_size_source = log.tree_size_source;
+    if tree_size_source == TreeSizeSource::GetSth {
+        warn!(
+            log = %log.description,
+            "reading tree head from get-sth: this log publishes no checkpoint, so its tile data is not verifiable"
+        );
+    }
 
     // Tracks the highest tree_size we've observed for rollback detection.
     // A static-CT log's tree_size must be monotonically non-decreasing; if the
@@ -752,7 +846,11 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         let max_delay_ms = config.retry_max_delay_ms;
         let initial = loop {
             attempt += 1;
-            let outcome: Result<u64, String> =
+            let outcome: Result<u64, String> = if tree_size_source == TreeSizeSource::GetSth {
+                fetch_sth_tree_size(&client, &sth_url, timeout, &log.description)
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
                 match client.get(&checkpoint_url).timeout(timeout).send().await {
                     Ok(resp) => match resp.text().await {
                         Ok(text) => match parse_checkpoint(&text, &expected_origin) {
@@ -776,7 +874,8 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                         Err(e) => Err(format!("read body: {e}")),
                     },
                     Err(e) => Err(format!("send: {e}")),
-                };
+                }
+            };
             match outcome {
                 Ok(size) => break Some(size),
                 Err(reason) => {
@@ -804,6 +903,11 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
             }
         };
         let Some(tree_size) = initial else { return };
+        let tree_size = if tree_size_source == TreeSizeSource::GetSth {
+            full_tile_floor(tree_size)
+        } else {
+            tree_size
+        };
         let start = tail_start(tree_size, config.start_overlap_leaves);
         info!(
             log = %log.description,
@@ -838,12 +942,13 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
             sleep(Duration::from_secs(config.health_check_interval_secs)).await;
         }
 
-        let raw_tree_size = match client.get(&checkpoint_url).timeout(timeout).send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                if status.as_u16() == 429 {
-                    let retry_after_ms =
-                        super::normalize::parse_retry_after(resp.headers(), &log.description);
+        // Named `raw` because the monotonicity guard below wants the head as
+        // reported; on the get-sth path it is already floored to a full tile,
+        // which is monotonic all the same.
+        let raw_tree_size = if tree_size_source == TreeSizeSource::GetSth {
+            match fetch_sth_tree_size(&client, &sth_url, timeout, &log.description).await {
+                Ok(size) => full_tile_floor(size),
+                Err(SthError::RateLimited(retry_after_ms)) => {
                     health.record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
                     metrics::counter!(
                         "certstream_ct_log_rate_limited_total",
@@ -852,70 +957,101 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                         "log_type" => "static_ct"
                     )
                     .increment(1);
-                    debug!(log = %log.description, retry_after_ms, "rate limited on checkpoint fetch, backing off");
-                    counter_checkpoint_errors.increment(1);
+                    debug!(log = %log.description, retry_after_ms, "rate limited on get-sth, backing off");
                     sleep(health.get_backoff()).await;
                     continue;
                 }
-                if !status.is_success() {
+                Err(SthError::Other(e)) => {
                     if was_unhealthy {
                         metrics::counter!("certstream_log_health_checks_failed").increment(1);
                     }
                     health.record_failure(config.unhealthy_threshold);
-                    debug!(log = %log.description, %status, "checkpoint fetch returned non-success");
-                    counter_checkpoint_errors.increment(1);
+                    debug!(log = %log.description, error = %e, "failed to fetch get-sth head");
                     sleep(health.get_backoff()).await;
                     continue;
                 }
-                match resp.text().await {
-                    Ok(text) => match parse_checkpoint(&text, &expected_origin) {
-                        Some(cp) => {
-                            if !accept_checkpoint_signature(
-                                &text,
-                                &expected_origin,
-                                log.key.as_deref(),
-                                config.checkpoint_signature_mode,
-                                &log.description,
-                                &log_name,
-                                &source_id,
-                            ) {
-                                health.record_failure(config.unhealthy_threshold);
-                                counter_checkpoint_errors.increment(1);
-                                sleep(health.get_backoff()).await;
-                                continue;
-                            }
-                            if was_unhealthy {
-                                info!(log = %log.description, "health check passed (static CT), resuming");
-                            }
-                            health.record_success(config.healthy_threshold);
-                            cp.tree_size
-                        }
-                        None => {
-                            health.record_failure(config.unhealthy_threshold);
-                            debug!(log = %log.description, "failed to parse checkpoint");
-                            counter_checkpoint_errors.increment(1);
-                            sleep(health.get_backoff()).await;
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        health.record_failure(config.unhealthy_threshold);
-                        debug!(log = %log.description, error = %e, "failed to read checkpoint");
+            }
+        } else {
+            match client.get(&checkpoint_url).timeout(timeout).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.as_u16() == 429 {
+                        let retry_after_ms =
+                            super::normalize::parse_retry_after(resp.headers(), &log.description);
+                        health
+                            .record_rate_limit_with_ms(config.unhealthy_threshold, retry_after_ms);
+                        metrics::counter!(
+                            "certstream_ct_log_rate_limited_total",
+                            "log" => log_name.clone(),
+                            "source_id" => source_id.clone(),
+                            "log_type" => "static_ct"
+                        )
+                        .increment(1);
+                        debug!(log = %log.description, retry_after_ms, "rate limited on checkpoint fetch, backing off");
                         counter_checkpoint_errors.increment(1);
                         sleep(health.get_backoff()).await;
                         continue;
                     }
+                    if !status.is_success() {
+                        if was_unhealthy {
+                            metrics::counter!("certstream_log_health_checks_failed").increment(1);
+                        }
+                        health.record_failure(config.unhealthy_threshold);
+                        debug!(log = %log.description, %status, "checkpoint fetch returned non-success");
+                        counter_checkpoint_errors.increment(1);
+                        sleep(health.get_backoff()).await;
+                        continue;
+                    }
+                    match resp.text().await {
+                        Ok(text) => match parse_checkpoint(&text, &expected_origin) {
+                            Some(cp) => {
+                                if !accept_checkpoint_signature(
+                                    &text,
+                                    &expected_origin,
+                                    log.key.as_deref(),
+                                    config.checkpoint_signature_mode,
+                                    &log.description,
+                                    &log_name,
+                                    &source_id,
+                                ) {
+                                    health.record_failure(config.unhealthy_threshold);
+                                    counter_checkpoint_errors.increment(1);
+                                    sleep(health.get_backoff()).await;
+                                    continue;
+                                }
+                                if was_unhealthy {
+                                    info!(log = %log.description, "health check passed (static CT), resuming");
+                                }
+                                health.record_success(config.healthy_threshold);
+                                cp.tree_size
+                            }
+                            None => {
+                                health.record_failure(config.unhealthy_threshold);
+                                debug!(log = %log.description, "failed to parse checkpoint");
+                                counter_checkpoint_errors.increment(1);
+                                sleep(health.get_backoff()).await;
+                                continue;
+                            }
+                        },
+                        Err(e) => {
+                            health.record_failure(config.unhealthy_threshold);
+                            debug!(log = %log.description, error = %e, "failed to read checkpoint");
+                            counter_checkpoint_errors.increment(1);
+                            sleep(health.get_backoff()).await;
+                            continue;
+                        }
+                    }
                 }
-            }
-            Err(e) => {
-                if was_unhealthy {
-                    metrics::counter!("certstream_log_health_checks_failed").increment(1);
+                Err(e) => {
+                    if was_unhealthy {
+                        metrics::counter!("certstream_log_health_checks_failed").increment(1);
+                    }
+                    health.record_failure(config.unhealthy_threshold);
+                    debug!(log = %log.description, error = %e, "failed to fetch checkpoint");
+                    counter_checkpoint_errors.increment(1);
+                    sleep(health.get_backoff()).await;
+                    continue;
                 }
-                health.record_failure(config.unhealthy_threshold);
-                debug!(log = %log.description, error = %e, "failed to fetch checkpoint");
-                counter_checkpoint_errors.increment(1);
-                sleep(health.get_backoff()).await;
-                continue;
             }
         };
 
@@ -936,6 +1072,18 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 "source_id" => source_id.clone()
             )
             .increment(1);
+            // A signed checkpoint that regresses is an integrity signal and
+            // earns a health penalty. `get-sth` is a different animal: it is
+            // served by a load-balanced fleet whose replicas disagree by a few
+            // entries at the head, so a lower head there is routine. Observed
+            // on TrustAsia's log2026b within a minute of starting, where the
+            // penalty pushed the watcher into backoff and it never advanced.
+            // Hold position and re-poll instead; the guard still does its real
+            // job of never reading tiles the log has not published.
+            if tree_size_source == TreeSizeSource::GetSth {
+                sleep(poll_interval).await;
+                continue;
+            }
             health.record_failure(config.unhealthy_threshold);
             sleep(health.get_backoff()).await;
             continue;
@@ -1324,6 +1472,19 @@ mod tests {
     fn test_tail_start_seeds_overlap_behind_head() {
         assert_eq!(tail_start(1_000_000, 256), 999_744);
         assert_eq!(tail_start(1_000_000, 0), 1_000_000);
+    }
+
+    #[test]
+    fn test_full_tile_floor_holds_head_at_last_complete_tile() {
+        // Logs without a checkpoint are not obliged to serve partial tiles,
+        // and TrustAsia's do not, so the head has to wait for the tile to
+        // fill rather than asking for `.p/<W>`.
+        assert_eq!(full_tile_floor(0), 0);
+        assert_eq!(full_tile_floor(255), 0);
+        assert_eq!(full_tile_floor(256), 256);
+        assert_eq!(full_tile_floor(257), 256);
+        assert_eq!(full_tile_floor(511), 256);
+        assert_eq!(full_tile_floor(2_579_691_575), 2_579_691_520);
     }
 
     #[test]

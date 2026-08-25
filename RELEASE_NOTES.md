@@ -1,3 +1,142 @@
+# Release Notes v1.5.5
+
+**Release date:** August 25, 2026
+
+A memory fix, the observability that was missing to find it, and tile fetching for logs that serve tiles without a checkpoint. Resident memory on hosts running transparent huge pages in `always` mode drops from ~360 MB to ~85 MB with no change to the ingest path. No wire-format changes; one added field in `/api/stats`.
+
+## Resident memory: jemalloc defaults
+
+v1.5.3 made jemalloc the global allocator but left it entirely unconfigured, and three of its defaults work against this workload.
+
+The dominant one is transparent huge pages. When the host runs THP in `always` mode, the kernel promotes jemalloc's 4 KiB pages into 2 MiB ones. jemalloc frees at 4 KiB granularity, and a huge page that is only partly free cannot be returned, so RSS parks at several times the live heap. Measured over two hours against all 45 Chrome- and Apple-trusted logs at ~420 certs/s: 358 MB RSS, of which 206 MB was `AnonHugePages`, against a live heap of 52 MB. Hosts running THP in `madvise` mode (Debian and Ubuntu defaults) never saw this, which is why it went unreported.
+
+The other two compound it. jemalloc sizes its arena count as 4 × logical CPUs, and inside a container that reads the *host* CPU count: 72 arenas on an 18-core machine, each with an independent dirty-page pool and decay clock, serving a runtime that only has 4 worker threads. And decay only advances when an arena is touched, so the arenas belonging to bursty watcher tasks held their dirty pages indefinitely.
+
+The binary now carries defaults for all three:
+
+```
+thp:never,narenas:4,background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000
+```
+
+Measured on the same workload:
+
+| | v1.5.4 | v1.5.5 |
+| --- | --: | --: |
+| RSS, THP `always` host | 358 MB | 85 MB |
+| RSS, THP `madvise` host | 88 MB | 76 MB |
+| `AnonHugePages` | 206 MB | 6 MB |
+| jemalloc `retained` | 116 MB | 34 MB |
+| arena metadata | 11.8 MB | 4.8 MB |
+| live heap (`allocated`) | 52 MB | 49 MB |
+
+The live heap never moved. Nothing in the ingest path was holding memory it should not have; the pages simply were not going back.
+
+These are defaults, not policy. jemalloc reads `_RJEM_MALLOC_CONF` after the embedded symbol, so any of it can be overridden without a rebuild:
+
+```bash
+docker run -e _RJEM_MALLOC_CONF=narenas:8,dirty_decay_ms:20000 ghcr.io/reloading01/certstream-server-rust:1.5.5
+```
+
+`thp` and `background_thread` are Linux-only in jemalloc, so non-Linux builds get the arena and decay settings alone. Passing them anyway made jemalloc print `No THP support` and `supports pthread only` to stderr on macOS.
+
+## Allocator metrics
+
+Six gauges, so the next version of this question is answerable from `/metrics` instead of from a heap profiler:
+
+| Metric | Meaning |
+| ------ | ------- |
+| `certstream_jemalloc_allocated_bytes` | live heap: what the process actually holds |
+| `certstream_jemalloc_resident_bytes` | physically resident pages mapped by the allocator |
+| `certstream_jemalloc_active_bytes` | active pages; the gap over `allocated` is size-class rounding |
+| `certstream_jemalloc_mapped_bytes` | address space mapped |
+| `certstream_jemalloc_retained_bytes` | returned to the OS, virtual mapping retained |
+| `certstream_jemalloc_metadata_bytes` | allocator's own bookkeeping, scales with arena count |
+
+`allocated` versus `resident` is the diagnostic pair: a gap between them is allocator behaviour, growth in `allocated` is the application holding data. The heartbeat log line carries both as `heap_allocated_mib` and `heap_resident_mib`.
+
+## Hybrid tile fetching
+
+`tree_size_source: get_sth` lets a static-CT watcher read the tree head from RFC 6962 `/ct/v1/get-sth` while reading entries from `/tile/data`. It exists for logs that serve tile data but answer `/checkpoint` with a 404, which today means TrustAsia's `log2026a`, `log2026b` and `hetu2027`.
+
+```yaml
+static_logs:
+  - name: "TrustAsia log2026a"
+    url: "https://ct2026-a.trustasia.com/log2026a"
+    expected_log_id: "dNudWPfUfp39eHoWKpkcGM9pjafHKZGMmhiwRQ26RLw="
+    tree_size_source: get_sth
+```
+
+The reason to bother is throughput. Fetching the same 256 entries from `log2026a` near the head, measured 2026-08-25:
+
+| Path | Size | Time |
+| ---- | ---: | ---: |
+| `/tile/data/x010/x076/918` | 189 KB | 5.96s cold, 0.36s warm |
+| `get-entries?start=…&end=…` | 696 KB | 30.4s / 30.7s / 25.2s |
+
+On the RFC 6962 path these logs fall behind and stay behind. Over a two-hour run against all 45 trusted logs, with `total_errors = 0` and no rate limiting on any of them: `log2026b` 278,890 entries behind the head, `log2026a` 79,392, `hetu2027` 37,898. The same operator's Luoshu2027, which does publish a checkpoint and is read over tiles, sat 1,310 entries behind.
+
+Two consequences worth stating plainly. There is no checkpoint, so nothing about these logs is verifiable on our side and a warning is logged at startup for each one; this is a deliberate trade of verifiability for data, appropriate because this server broadcasts certificates rather than monitoring logs cryptographically. And the head is held at the last full tile: static-ct-api only requires partial tiles for tree sizes a checkpoint was published for, so a log that publishes none owes none, and TrustAsia's do not serve them. The newest 0-255 entries wait for their tile to fill.
+
+An override carrying `tree_size_source: get_sth` is allowed to replace a catalog-discovered RFC 6962 log with a static-CT watcher for the same `log_id`, which is otherwise rejected as a silent protocol switch. Without the declaration that rejection still stands, and the exemption does not work in reverse: it will not let an RFC 6962 override take over a tiled log.
+
+Two operational notes came out of running this against the real logs. Overrides now inherit the operator name of the log they replace, and `static_logs[].operator` sets it for a log that exists in no catalog. Outbound rate limits are keyed by operator, and every local static entry used to be stamped `Static CT`, so three overrides for one operator shared a single bucket under a name matching no `operator_rate_limits` key while that operator's other logs ran in their own. And busy logs want a higher `fetch_concurrency` than the default: tiles near the head miss the CDN cache and take seconds each, so 4 in flight caps a watcher near 50 entries/s. Measured across the three TrustAsia logs, 16 in flight gave ~276 entries/s, enough for two of them to reach zero lag and hold it.
+
+Reported, measured and specified by Effy Elden (@ineffyble) in #14, including the ct-policy thread that established what TrustAsia will and will not serve.
+
+## `dedup.capacity` now bounds the cache
+
+`capacity` bounded nothing. TTL expiry was the only thing pruning the map, so the steady-state size was ingest rate × TTL: ~420 certs/s × 900 s ≈ 354K entries against a configured 200K. Anyone sizing memory from `capacity` was out by that factor.
+
+`cleanup` now narrows the effective TTL window in proportion to the overshoot, riding along on the sweep that already walks every entry rather than adding work to the insert path (an early version of this evicted inline on every insert and thrashed CPU). Keeping 200K of 354K entries means keeping the newest ~56% of the window. Narrowing it can only let more duplicates through, never fewer, so an over-capacity filter degrades in dedup depth and never in correctness.
+
+`certstream_dedup_effective_ttl_seconds` reports the window actually in force, and `certstream_dedup_capacity_trims` counts sweeps that had to narrow it. Both being quiet means `capacity` is not binding.
+
+## `bytes_sent` counts bytes that were sent
+
+`throughput.bytes_sent` summed all three serialized formats per certificate regardless of who was subscribed. Over a two-hour run with one domains-only subscriber it reported 26.8 GB while the container's actual network egress was 555 MB.
+
+It now counts what goes out to WebSocket and SSE subscribers. The old number moved to `throughput.bytes_serialized`, which is worth watching in its own right: the gap between the two is the cost of serializing formats nobody is subscribed to, which is the signal to disable one via `streams.full` / `streams.lite` / `streams.domains_only`.
+
+Both are also exported as `certstream_bytes_sent_total{protocol}` and `certstream_bytes_serialized_total`. Subscribers accumulate their byte counts locally and flush in batches, so a fan-out to many clients does not turn one broadcast into one atomic write per client.
+
+## CT log lag
+
+`certstream_ct_log_lag_entries{log}` reports how far behind each log's head the watcher is. Health status only answers "are requests succeeding", so a log can sit `healthy` while falling further behind on every poll. On a two-hour run 19 of 45 logs were healthy and more than 5K entries behind, one of them by 1.3M. `/api/logs` already carried `current_index` and `tree_size`; this makes the difference alertable.
+
+## Issuer cache hit rate
+
+`certstream_issuer_cache_hits` counted 13 against 487 misses on a two-hour run, which reads as a cache that never hits. The counter sat in `fetch_issuer`, but the tile pre-warm path filters fingerprints through `IssuerCache::get` directly and never reaches `fetch_issuer` on a hit. Both counters moved to the lookup itself. The number of issuers actually fetched over the network is now `certstream_issuer_fetch_attempts`.
+
+## SSE is opt-in, and the docs now say so
+
+`protocols.sse` defaults to `false`, like `protocols.api`, but the README env table, `config.example.yaml` and the docs site all listed it as enabled. Following the README's `docker run` quick start therefore produced a 404 on `/sse` with nothing to explain it; `docker-compose.yml` hid the mismatch by passing `CERTSTREAM_SSE_ENABLED` explicitly.
+
+The default is unchanged. The documentation was wrong and is now corrected, and a test pins the serde field default so it cannot drift from `ProtocolConfig::default()` unnoticed.
+
+## Configuration
+
+| Setting | Old | New |
+| ------- | --: | --: |
+| `static_logs[].tree_size_source` | none | `checkpoint` (new; `get_sth` opts into hybrid tile fetching) |
+| `static_logs[].operator` | none | inherited from the replaced log (new; declare it for logs in no catalog) |
+| `dedup.capacity` | advisory, unenforced | enforced by the cleanup sweep |
+
+## API
+
+`/api/stats` gains `throughput.bytes_serialized`. `throughput.bytes_sent` keeps its name and changes meaning, as described above.
+
+## Tests
+
+269 unit tests (was 262) plus the integration and snapshot suites.
+
+## Upgrade
+
+Drop-in. No configuration defaults changed.
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.5.5
+```
+
 # Release Notes — v1.5.4
 
 **Release date:** August 22, 2026

@@ -11,7 +11,7 @@ buffer_size: 1000
 
 protocols:
   websocket: true
-  sse: true
+  sse: false        # opt-in
   metrics: true
   health: true
   example_json: true
@@ -121,3 +121,29 @@ static_logs:
     # expected_log_id: "base64-sha256-log-id"
     # batch_size: 128
     # poll_interval_ms: 2000
+
+  # Hybrid: an RFC 6962 log that serves tile data but no checkpoint.
+  # `tree_size_source: get_sth` reads the head from /ct/v1/get-sth and the
+  # entries from /tile/data. TrustAsia's log2026a, log2026b and hetu2027 are
+  # the logs this exists for; their get-entries takes 25-31s per 256 entries
+  # while the same entries come from a warm tile in under a second.
+  #
+  # There is no checkpoint to verify, so these logs are ingested unverified.
+  # The head is held at the last full tile because a log that publishes no
+  # checkpoint is not obliged to serve partial tiles, and these do not.
+  # Setting this on a log whose operator has not said they serve tiles will
+  # simply 404 on every tile fetch.
+  #
+  # Tiles near the head miss the CDN cache, so a busy log needs more in-flight
+  # fetches than the default 4 (which caps a watcher near 50 entries/s).
+  # `ct_log.fetch_concurrency: 16` measured ~276 entries/s across these three.
+  #
+  # `operator` is only needed for a log that exists in no catalog; an entry
+  # replacing a discovered log inherits that log's operator, which is what
+  # keeps it in the right rate-limit bucket.
+  #
+  # - name: "TrustAsia log2026a"
+  #   url: "https://ct2026-a.trustasia.com/log2026a"
+  #   expected_log_id: "dNudWPfUfp39eHoWKpkcGM9pjafHKZGMmhiwRQ26RLw="
+  #   tree_size_source: get_sth
+  #   # operator: "trustasia"

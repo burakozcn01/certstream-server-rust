@@ -32,11 +32,9 @@ const DEFAULT_CLEANUP_INTERVAL_SECS: u64 = 15;
 /// vs SipHash's full keyed permutation on every lookup.
 pub struct DedupFilter {
     seen: DashMap<[u8; 32], Instant, ahash::RandomState>,
-    /// Configured upper bound for the cache (advisory; the actual bound is
-    /// the TTL-driven `cleanup_task` that runs every 60s). Kept on the
-    /// struct so future code paths can re-introduce a high-water guard
-    /// without bouncing through the YAML.
-    #[allow(dead_code)]
+    /// Upper bound on entries. Enforced by `cleanup`, which narrows the
+    /// effective TTL window when the map overshoots, so the bound costs
+    /// nothing on the insert path.
     capacity: usize,
     ttl: Duration,
 }
@@ -64,12 +62,11 @@ impl DedupFilter {
     /// per-shard. Two concurrent calls with the same key can never both
     /// observe "not present" and both return true.
     ///
-    /// **Cost note:** the `capacity` field is purely advisory — the periodic
-    /// `cleanup_task` (every 60s) is the only thing that prunes by TTL. An
-    /// earlier version called `evict_expired()` inline whenever `len() >=
-    /// capacity`, which thrashed CPU when ingest rate × TTL exceeded the cap
-    /// (every insert ran a full O(n) shard scan). The hot path now only
-    /// does the entry lookup; bounding is the cleanup task's job.
+    /// **Cost note:** both TTL expiry and the capacity bound are applied by
+    /// `cleanup`, never here. An earlier version called `evict_expired()`
+    /// inline whenever `len() >= capacity`, which thrashed CPU when ingest
+    /// rate × TTL exceeded the cap (every insert ran a full O(n) shard scan).
+    /// The hot path only does the entry lookup.
     pub fn is_new(&self, sha256_raw: &[u8; 32]) -> bool {
         let now = Instant::now();
 
@@ -94,12 +91,45 @@ impl DedupFilter {
     pub fn cleanup(&self) {
         let before = self.seen.len();
         let now = Instant::now();
-        self.seen.retain(|_, v| now.duration_since(*v) < self.ttl);
+
+        // `capacity` used to bound nothing: TTL was the only thing pruning the
+        // map, so the steady-state size was ingest rate × TTL. Measured on the
+        // live workload that is ~420 certs/s × 900 s = ~354K entries against a
+        // configured 200K, so anyone sizing memory from `capacity` was out by
+        // that factor.
+        //
+        // Rather than evicting oldest-first (which needs the ages sorted, an
+        // allocation proportional to the map) the window itself is narrowed in
+        // proportion to the overshoot: keeping 200K of 354K entries means
+        // keeping the newest ~56% of the TTL window. Arrival is close enough to
+        // uniform across a 15-minute window that this lands within a few
+        // percent of exact oldest-first eviction, and it rides along on the
+        // sweep that already walks every entry.
+        //
+        // Narrowing the window can only let more duplicates through, never
+        // fewer, so an over-capacity filter degrades in dedup depth and never
+        // in correctness.
+        let effective_ttl = if before > self.capacity {
+            let ratio = self.capacity as f64 / before as f64;
+            metrics::counter!("certstream_dedup_capacity_trims").increment(1);
+            self.ttl.mul_f64(ratio)
+        } else {
+            self.ttl
+        };
+
+        self.seen
+            .retain(|_, v| now.duration_since(*v) < effective_ttl);
         let removed = before.saturating_sub(self.seen.len());
         if removed > 0 {
-            debug!(removed = removed, remaining = self.seen.len(), "dedup cleanup");
+            debug!(
+                removed = removed,
+                remaining = self.seen.len(),
+                effective_ttl_secs = effective_ttl.as_secs_f64(),
+                "dedup cleanup"
+            );
         }
         metrics::gauge!("certstream_dedup_cache_size").set(self.seen.len() as f64);
+        metrics::gauge!("certstream_dedup_effective_ttl_seconds").set(effective_ttl.as_secs_f64());
     }
 
     /// Snapshot of current entry count. Used by the heartbeat log and by
@@ -186,6 +216,49 @@ mod tests {
 
         // Should be treated as new again after TTL expiry
         assert!(filter.is_new(&k));
+    }
+
+    #[test]
+    fn test_cleanup_over_capacity_narrows_window() {
+        // Over capacity, entries younger than the full TTL are still evicted:
+        // the window shrinks in proportion to the overshoot. Before this the
+        // map grew to ingest-rate × TTL and `capacity` bounded nothing.
+        let filter = DedupFilter {
+            seen: DashMap::with_capacity_and_hasher(64, ahash::RandomState::default()),
+            capacity: 5,
+            ttl: Duration::from_millis(400),
+        };
+
+        for i in 0u8..20 {
+            assert!(filter.is_new(&key(i)));
+        }
+        thread::sleep(Duration::from_millis(120));
+        for i in 20u8..40 {
+            assert!(filter.is_new(&key(i)));
+        }
+
+        // 40 entries against a capacity of 5 gives an effective window of
+        // 400ms × 5/40 = 50ms, so the first batch (120ms old) goes even though
+        // the configured TTL has not elapsed for any of them.
+        filter.cleanup();
+        assert!(filter.len() < 40, "cleanup should have evicted the older batch");
+        assert!(filter.is_new(&key(0)), "oldest entry should be gone");
+        assert!(!filter.is_new(&key(39)), "newest entry should still be held");
+    }
+
+    #[test]
+    fn test_cleanup_under_capacity_keeps_full_ttl() {
+        let filter = DedupFilter {
+            seen: DashMap::with_capacity_and_hasher(64, ahash::RandomState::default()),
+            capacity: 1000,
+            ttl: Duration::from_secs(300),
+        };
+
+        for i in 0u8..10 {
+            assert!(filter.is_new(&key(i)));
+        }
+        filter.cleanup();
+        assert_eq!(filter.len(), 10, "nothing expired, nothing over capacity");
     }
 
     #[test]
