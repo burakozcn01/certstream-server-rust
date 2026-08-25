@@ -644,8 +644,44 @@ docker compose up -d</pre>
                         <tr><td><code>certstream_issuer_cache_size</code></td><td>gauge</td><td>Cached issuer certificates</td></tr>
                         <tr><td><code>certstream_duplicates_filtered</code></td><td>counter</td><td>Duplicate certificates filtered by dedup</td></tr>
                         <tr><td><code>certstream_dedup_cache_size</code></td><td>gauge</td><td>Current dedup cache entries</td></tr>
+                        <tr><td><code>certstream_dedup_effective_ttl_seconds</code></td><td>gauge</td><td>Dedup window actually in force. Drops below <code>dedup.ttl_secs</code> when the cache is over capacity</td></tr>
                     </tbody>
                 </table>
+                <h3>Keeping up</h3>
+                <p>Health status answers whether requests are succeeding, not whether the watcher is keeping pace. A log can stay healthy while falling further behind on every poll, so alert on lag growing rather than on any absolute value: catching up after a restart is normal.</p>
+                <table class="endpoints-table">
+                    <thead><tr><th>Metric</th><th>Type</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>certstream_ct_log_lag_entries</code></td><td>gauge</td><td>Entries between the watcher's position and the log's head, per log</td></tr>
+                        <tr><td><code>certstream_ct_log_rate_limited_total</code></td><td>counter</td><td>Requests answered with 429, per log</td></tr>
+                        <tr><td><code>certstream_ct_log_empty_responses_total</code></td><td>counter</td><td>get-entries responses containing no entries</td></tr>
+                        <tr><td><code>certstream_issuer_cache_hits</code> / <code>_misses</code></td><td>counter</td><td>Issuer cache lookups</td></tr>
+                        <tr><td><code>certstream_issuer_fetch_attempts</code></td><td>counter</td><td>Issuers actually retrieved over the network, which a miss does not imply</td></tr>
+                    </tbody>
+                </table>
+                <h3>Bandwidth</h3>
+                <table class="endpoints-table">
+                    <thead><tr><th>Metric</th><th>Type</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>certstream_bytes_sent_total</code></td><td>counter</td><td>Bytes written to subscribers, labelled by protocol</td></tr>
+                        <tr><td><code>certstream_bytes_serialized_total</code></td><td>counter</td><td>Bytes produced by serialization, counted once per certificate across every enabled stream format</td></tr>
+                    </tbody>
+                </table>
+                <p>A large gap between the two means a stream format is enabled that nobody subscribes to. Disabling it under <code>streams</code> removes that serialization entirely.</p>
+                <h3>Memory</h3>
+                <p>Resident memory alone cannot separate &quot;the process is holding this data&quot; from &quot;the allocator has not returned these pages yet&quot;. These answer that: a gap between <code>allocated</code> and <code>resident</code> is allocator behaviour, while growth in <code>allocated</code> is the application holding data.</p>
+                <table class="endpoints-table">
+                    <thead><tr><th>Metric</th><th>Type</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>certstream_jemalloc_allocated_bytes</code></td><td>gauge</td><td>Live heap: what the process actually holds</td></tr>
+                        <tr><td><code>certstream_jemalloc_resident_bytes</code></td><td>gauge</td><td>Physically resident pages mapped by the allocator</td></tr>
+                        <tr><td><code>certstream_jemalloc_active_bytes</code></td><td>gauge</td><td>Active pages; the excess over <code>allocated</code> is size-class rounding</td></tr>
+                        <tr><td><code>certstream_jemalloc_mapped_bytes</code></td><td>gauge</td><td>Address space mapped by the allocator</td></tr>
+                        <tr><td><code>certstream_jemalloc_retained_bytes</code></td><td>gauge</td><td>Returned to the OS, virtual mapping retained</td></tr>
+                        <tr><td><code>certstream_jemalloc_metadata_bytes</code></td><td>gauge</td><td>Allocator bookkeeping; scales with arena count</td></tr>
+                    </tbody>
+                </table>
+                <p>Steady state is around 80 MB resident at 420 certificates a second. If resident sits far above the live heap, check the host's transparent huge page setting with <code>cat /sys/kernel/mm/transparent_hugepage/enabled</code>; the reasoning is in <a href="/blog/jemalloc-transparent-huge-pages-rss.html">this write-up</a>.</p>
             </div>
         </section>
 
