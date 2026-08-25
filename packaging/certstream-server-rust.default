@@ -1,0 +1,8 @@
+# Environment for certstream-server-rust (sourced by the systemd unit).
+# Full list: https://certstream.dev/docs.html
+#
+# CERTSTREAM_PORT=8080
+# CERTSTREAM_LOG_LEVEL=info
+# CERTSTREAM_SSE_ENABLED=true
+# CERTSTREAM_API_ENABLED=true
+# CERTSTREAM_CONNECTION_LIMIT_ENABLED=true

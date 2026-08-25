@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-FKL0PZPXZL"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag("js", new Date());
+      gtag("config", "G-FKL0PZPXZL");
+    </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Engineering blog: Certificate Transparency, Rust, performance | certstream-server-rust</title>
+    <meta name="description" content="Write-ups from building a Certificate Transparency streaming server in Rust: jemalloc and transparent huge pages, HTTP/2 versus per-connection rate limits, CT log tile protocols.">
+    <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">
+    <meta name="author" content="reloading01">
+    <meta name="keywords" content="certificate transparency, rust performance, jemalloc, HTTP/2, CT logs, systems engineering blog">
+    <link rel="canonical" href="https://certstream.dev/blog/">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://certstream.dev/blog/">
+    <meta property="og:title" content="certstream-server-rust engineering blog">
+    <meta property="og:description" content="Write-ups from building a Certificate Transparency streaming server in Rust: jemalloc and transparent huge pages, HTTP/2 versus per-connection rate limits, CT log tile protocols.">
+    <meta property="og:site_name" content="certstream-server-rust">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="certstream-server-rust engineering blog">
+    <meta name="twitter:description" content="Write-ups from building a Certificate Transparency streaming server in Rust: jemalloc and transparent huge pages, HTTP/2 versus per-connection rate limits, CT log tile protocols.">
+    <meta name="theme-color" content="#b7410e">
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="alternate" type="application/rss+xml" title="certstream-server-rust blog" href="/feed.xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/styles.css">
+    <script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@type": "Blog",
+    "@id": "https://certstream.dev/blog/",
+    "name": "certstream-server-rust blog",
+    "description": "Engineering write-ups from building a Certificate Transparency streaming server: allocator behaviour, HTTP transport, CT log protocols.",
+    "url": "https://certstream.dev/blog/",
+    "inLanguage": "en",
+    "publisher": {
+        "@type": "Organization",
+        "name": "certstream-server-rust",
+        "url": "https://certstream.dev"
+    },
+    "blogPost": [
+        {
+            "@type": "BlogPosting",
+            "headline": "I blamed HTTP/2 multiplexing. Then I counted the connections.",
+            "datePublished": "2026-08-25",
+            "url": "https://certstream.dev/blog/http2-multiplexing-vs-per-connection-rate-limits.html",
+            "description": "Six CT logs were falling behind. HTTP/2 multiplexes every request onto one connection, so we pinned the operator to HTTP/1.1 and got three connections instead of one. Throughput did not move: 49.0 vs 50.0 entries a second. The real limit was 29 entries returned for a 1024-entry request."
+        },
+        {
+            "@type": "BlogPosting",
+            "headline": "The CT logs that serve tiles but publish no checkpoint",
+            "datePublished": "2026-08-25",
+            "url": "https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html",
+            "description": "Three CT logs were falling 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. Reading them with the tree size from get-sth, and the three failures that only appeared against live logs."
+        },
+        {
+            "@type": "BlogPosting",
+            "headline": "358 MB resident, 52 MB in use: where the rest went",
+            "datePublished": "2026-08-25",
+            "url": "https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html",
+            "description": "A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. Transparent huge pages were holding 206 MB jemalloc could not return, and the fix was five settings the allocator had been running without."
+        }
+    ]
+}
+    </script>
+</head>
+<body>
+    <header>
+        <div class="wrap">
+            <a href="/" class="logo">certstream-server-rust</a>
+            <nav>
+                <ul class="nav-links">
+                    <li><a href="/">Home</a></li>
+                    <li><a href="/docs.html">API Docs</a></li>
+                    <li><a href="/quickstart.html">Quick Start</a></li>
+                    <li><a href="/architecture.html">Architecture</a></li>
+                    <li><a href="/blog/" class="active">Blog</a></li>
+                </ul>
+            </nav>
+            <button class="mobile-menu-btn" onclick="document.getElementById('mobile-nav').classList.add('active')"><span></span><span></span><span></span></button>
+            <a href="https://github.com/reloading01/certstream-server-rust" class="gh-link" target="_blank" rel="noopener">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                GitHub
+            </a>
+        </div>
+    </header>
+    <div class="mobile-nav" id="mobile-nav">
+        <div class="mobile-nav-header">
+            <a href="/" class="logo">certstream-server-rust</a>
+            <button class="mobile-nav-close" onclick="document.getElementById('mobile-nav').classList.remove('active')">&times;</button>
+        </div>
+        <ul class="mobile-nav-links">
+            <li><a href="/">Home</a></li>
+            <li><a href="/docs.html">API Docs</a></li>
+            <li><a href="/quickstart.html">Quick Start</a></li>
+            <li><a href="/architecture.html">Architecture</a></li>
+            <li><a href="/blog/" class="active">Blog</a></li>
+            <li><a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a></li>
+        </ul>
+    </div>
+
+    <main>
+        <section class="page-header">
+            <div class="wrap">
+                <span class="eyebrow">Engineering notes</span>
+                <h1>Blog</h1>
+                <p>Problems found while running a Certificate Transparency streaming server against every trusted log, and what the fixes turned out to be. Measurements included, wrong turns included. <a class="feed-link" href="/feed.xml">RSS</a></p>
+            </div>
+        </section>
+        <section class="post-list">
+            <div class="wrap">
+                <article class="post-list-item">
+                    <div class="post-meta"><time datetime="2026-08-25">25 August 2026</time></div>
+                    <h2><a href="/blog/http2-multiplexing-vs-per-connection-rate-limits.html">I blamed HTTP/2 multiplexing. Then I counted the connections.</a></h2>
+                    <p>Every request succeeded. The log stayed 33,000 entries behind. The mechanism I blamed was real, present, and not the problem.</p>
+                </article>
+                <article class="post-list-item">
+                    <div class="post-meta"><time datetime="2026-08-25">25 August 2026</time></div>
+                    <h2><a href="/blog/ct-logs-tiles-without-checkpoint.html">The CT logs that serve tiles but publish no checkpoint</a></h2>
+                    <p>Three logs, zero errors, 279,000 entries behind. The fast way to read them was sitting right there, behind a missing file.</p>
+                </article>
+                <article class="post-list-item">
+                    <div class="post-meta"><time datetime="2026-08-25">25 August 2026</time></div>
+                    <h2><a href="/blog/jemalloc-transparent-huge-pages-rss.html">358 MB resident, 52 MB in use: where the rest went</a></h2>
+                    <p>A service that looked like it was leaking. It wasn&#x27;t, and the fix was five settings the allocator had been running without.</p>
+                </article>
+            </div>
+        </section>
+    </main>
+    <footer>
+        <div class="wrap">
+            <div class="links">
+                <a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a>
+                <a href="/blog/">Blog</a>
+                <a href="/docs.html">Documentation</a>
+                <a href="/feed.xml">RSS</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
+                <a href="https://github.com/sponsors/reloading01" target="_blank" rel="noopener">Sponsor</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+            </div>
+            <span class="colophon">certstream-server-rust</span>
+        </div>
+    </footer>
+</body>
+</html>

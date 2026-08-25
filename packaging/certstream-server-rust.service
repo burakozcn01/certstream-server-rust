@@ -1,0 +1,47 @@
+[Unit]
+Description=certstream-server-rust: Certificate Transparency log streaming server
+Documentation=https://certstream.dev/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/certstream-server-rust
+Restart=on-failure
+RestartSec=5s
+
+# DynamicUser gives the service its own transient uid, so the package does not
+# have to create and clean up a system account. StateDirectory then owns
+# /var/lib/certstream for it, which is where the CT log position is persisted:
+# lose that file and the server restarts from each log's head instead of where
+# it left off.
+DynamicUser=yes
+StateDirectory=certstream
+Environment=CERTSTREAM_CT_LOG_STATE_FILE=/var/lib/certstream/state.json
+
+# Drop-in overrides go in /etc/systemd/system/certstream-server-rust.service.d/
+# or use an environment file:
+EnvironmentFile=-/etc/default/certstream-server-rust
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Steady state is around 80 MB resident. Uncomment to cap it; leave headroom
+# for catch-up bursts after a long outage.
+# MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,10 +1,17 @@
 [package]
 name = "certstream-server-rust"
-version = "1.5.5"
+version = "1.5.6"
 edition = "2024"
 repository = "https://github.com/reloading01/certstream-server-rust"
+homepage = "https://certstream.dev"
+documentation = "https://certstream.dev/docs.html"
 license = "MIT"
+readme = "README.md"
 description = "High-performance Certificate Transparency log streaming server"
+keywords = ["certificate", "transparency", "certstream", "websocket", "tls"]
+categories = ["command-line-utilities", "network-programming"]
+# The published crate is the server, not the site or the dashboards.
+exclude = ["docs/", "grafana/", "soak/", "packaging/", "*.png", "certstream_state.json"]
 
 [features]
 default = ["simd"]
@@ -92,6 +99,41 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
 
 [dev-dependencies]
 rcgen = "0.14"
+
+# cargo-deb: `cargo deb` produces a package that installs the binary, the
+# systemd unit and the example config. The unit uses DynamicUser, so there is
+# no account to create in a maintainer script.
+[package.metadata.deb]
+maintainer = "reloading01 <reloading01@users.noreply.github.com>"
+copyright = "2026, reloading01"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+Monitors every Chrome- and Apple-trusted Certificate Transparency log and \
+streams newly issued TLS certificates over WebSocket and SSE. Speaks both \
+RFC 6962 and the static-ct-api tile protocol from a single binary."""
+section = "net"
+priority = "optional"
+assets = [
+    ["target/release/certstream-server-rust", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/certstream-server-rust/README.md", "644"],
+    ["config.example.yaml", "usr/share/doc/certstream-server-rust/config.example.yaml", "644"],
+    ["packaging/certstream-server-rust.default", "etc/default/certstream-server-rust", "644"],
+]
+conf-files = ["/etc/default/certstream-server-rust"]
+maintainer-scripts = "packaging/"
+systemd-units = { unit-name = "certstream-server-rust", unit-scripts = "packaging/", enable = false, start = false }
+
+# cargo-generate-rpm: run after `cargo build --release`.
+[package.metadata.generate-rpm]
+summary = "Certificate Transparency log streaming server"
+license = "MIT"
+assets = [
+    { source = "target/release/certstream-server-rust", dest = "/usr/bin/certstream-server-rust", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/certstream-server-rust/README.md", mode = "644", doc = true },
+    { source = "config.example.yaml", dest = "/usr/share/doc/certstream-server-rust/config.example.yaml", mode = "644", doc = true },
+    { source = "packaging/certstream-server-rust.service", dest = "/usr/lib/systemd/system/certstream-server-rust.service", mode = "644" },
+    { source = "packaging/certstream-server-rust.default", dest = "/etc/default/certstream-server-rust", mode = "644", config = true },
+]
 
 [profile.release]
 lto = "fat"

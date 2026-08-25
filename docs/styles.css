@@ -487,3 +487,167 @@ footer .colophon { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; 
     .endpoints-table th, .endpoints-table td { white-space: nowrap; }
     footer .wrap { flex-direction: column; align-items: flex-start; }
 }
+
+/* ============================================================
+   blog — long-form posts on the same paper
+   ============================================================ */
+
+.post-list { padding: 56px 0 96px; }
+
+.post-list-item {
+    padding: 30px 0;
+    border-bottom: 1px solid var(--line);
+}
+.post-list-item:first-of-type { border-top: 1px solid var(--line); }
+
+.post-list-item h2 {
+    font-family: 'Newsreader', Georgia, serif;
+    font-size: 1.55rem;
+    font-weight: 500;
+    line-height: 1.25;
+    letter-spacing: -0.01em;
+    margin-bottom: 8px;
+}
+.post-list-item h2 a { color: var(--ink); text-decoration: none; }
+.post-list-item h2 a:hover { color: var(--rust); }
+
+.post-list-item p { color: var(--ink-2); max-width: 68ch; }
+
+.post-meta {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.78rem;
+    color: var(--ink-3);
+    letter-spacing: 0.02em;
+    margin-bottom: 10px;
+}
+.post-meta .dot { margin: 0 8px; opacity: 0.5; }
+
+/* The article column is narrower than the site shell: prose wants a measure
+   you can actually track across, code and tables get to break out of it. */
+.post { padding: 48px 0 104px; }
+.post-header { max-width: 46rem; margin-bottom: 40px; }
+
+.post-header h1 {
+    font-family: 'Newsreader', Georgia, serif;
+    font-size: clamp(2rem, 4.2vw, 2.9rem);
+    font-weight: 500;
+    line-height: 1.14;
+    letter-spacing: -0.02em;
+    margin-bottom: 14px;
+}
+.post-header .standfirst {
+    font-family: 'Newsreader', Georgia, serif;
+    font-size: 1.2rem;
+    line-height: 1.5;
+    color: var(--ink-2);
+}
+
+.prose { max-width: 46rem; }
+.prose > * + * { margin-top: 1.15em; }
+.prose p { font-size: 1.03rem; line-height: 1.72; }
+
+.prose h2 {
+    font-family: 'Newsreader', Georgia, serif;
+    font-size: 1.6rem;
+    font-weight: 500;
+    line-height: 1.25;
+    letter-spacing: -0.01em;
+    margin-top: 2.4em;
+    padding-top: 0.6em;
+    border-top: 1px solid var(--line);
+}
+.prose h3 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin-top: 1.9em;
+    letter-spacing: 0.01em;
+}
+
+.prose a { color: var(--rust); text-decoration: none; border-bottom: 1px solid rgba(183, 65, 14, 0.35); }
+.prose a:hover { border-bottom-color: var(--rust); }
+
+.prose code {
+    background: rgba(28, 27, 22, 0.055);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.1em 0.34em;
+    font-size: 0.88em;
+}
+
+.prose pre {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.6;
+}
+.prose pre code { background: none; border: 0; padding: 0; font-size: inherit; color: inherit; }
+.prose pre .cm { color: var(--code-dim); font-style: italic; }
+.prose pre .hi { color: var(--syn-kw); }
+
+.prose ul, .prose ol { padding-left: 1.3em; }
+.prose li + li { margin-top: 0.45em; }
+
+.prose blockquote {
+    border-left: 2px solid var(--rust);
+    padding-left: 18px;
+    color: var(--ink-2);
+    font-family: 'Newsreader', Georgia, serif;
+    font-size: 1.1rem;
+}
+
+/* Tables and wide figures step outside the reading column on roomy screens. */
+.prose .wide { max-width: min(58rem, 100%); }
+
+.prose table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    margin-top: 1.15em;
+}
+.prose th, .prose td {
+    text-align: left;
+    padding: 9px 14px 9px 0;
+    border-bottom: 1px solid var(--line);
+}
+.prose th {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.76rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink-3);
+    font-weight: 500;
+}
+.prose td.num, .prose th.num { text-align: right; font-family: 'IBM Plex Mono', monospace; padding-right: 0; }
+
+.prose figure { margin-top: 1.6em; }
+.prose figcaption {
+    font-size: 0.83rem;
+    color: var(--ink-3);
+    margin-top: 8px;
+    font-style: italic;
+}
+
+.post-footer {
+    max-width: 46rem;
+    margin-top: 3.2em;
+    padding-top: 1.4em;
+    border-top: 1px solid var(--line);
+    font-size: 0.93rem;
+    color: var(--ink-2);
+}
+
+.feed-link {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.78rem;
+    color: var(--ink-3);
+    text-decoration: none;
+}
+.feed-link:hover { color: var(--rust); }
+
+@media (max-width: 640px) {
+    .prose p { font-size: 1rem; }
+    .post-list-item h2 { font-size: 1.3rem; }
+}

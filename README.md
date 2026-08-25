@@ -50,7 +50,61 @@ Visit **[certstream.dev](https://certstream.dev/)** for:
 - Client examples and integration guides
 - Self-hosting guide
 
-## Quick Start
+## Install
+
+Prebuilt binaries are static musl builds on Linux, so they run regardless of glibc version. Every archive ships with a `.sha256` next to it.
+
+**Script** (Linux and macOS, x86_64 and arm64):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/reloading01/certstream-server-rust/main/install.sh | sh
+```
+
+It verifies the checksum and refuses to install without one. `PREFIX=$HOME/.local` avoids needing root; `VERSION=v1.5.6` pins a release.
+
+**Homebrew**:
+
+```bash
+brew install reloading01/tap/certstream-server-rust
+```
+
+**Debian, Ubuntu** (repository, so `apt upgrade` keeps it current):
+
+```bash
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://reloading01.github.io/packages/key.gpg | sudo tee /etc/apt/keyrings/certstream.asc > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/certstream.asc] https://reloading01.github.io/packages/apt stable main" | sudo tee /etc/apt/sources.list.d/certstream.list
+sudo apt update && sudo apt install certstream-server-rust
+sudo systemctl enable --now certstream-server-rust
+```
+
+**Fedora, RHEL, openSUSE**:
+
+```bash
+sudo rpm --import https://reloading01.github.io/packages/key.gpg
+sudo tee /etc/yum.repos.d/certstream.repo > /dev/null <<'REPO'
+[certstream]
+name=certstream-server-rust
+baseurl=https://reloading01.github.io/packages/rpm
+enabled=1
+gpgcheck=1
+gpgkey=https://reloading01.github.io/packages/key.gpg
+REPO
+sudo dnf install certstream-server-rust
+sudo systemctl enable --now certstream-server-rust
+```
+
+Both repositories are signed; package managers verify every update against the key. Prefer a single file? The `.deb` and `.rpm` are also attached to each [release](https://github.com/reloading01/certstream-server-rust/releases/latest), installable with `apt install ./file.deb` or `rpm -i file.rpm`.
+
+Either way you get a systemd unit that runs under `DynamicUser` and keeps CT log positions in `/var/lib/certstream`. Settings go in `/etc/default/certstream-server-rust`.
+
+**Cargo**:
+
+```bash
+cargo install certstream-server-rust
+```
+
+**Docker**:
 
 ```bash
 docker run -d -p 8080:8080 ghcr.io/reloading01/certstream-server-rust:latest
@@ -64,6 +118,12 @@ docker run -d \
   -e CERTSTREAM_CONNECTION_LIMIT_ENABLED=true \
   ghcr.io/reloading01/certstream-server-rust:latest
 ```
+
+Whichever way you install it, the server needs no configuration to start: it discovers the CT logs, serves WebSocket on `:8080`, and persists its position so a restart resumes rather than replays.
+
+## Configuration
+
+Everything below is optional. Environment variables override the YAML file, which overrides the defaults.
 
 ### Environment Variables
 

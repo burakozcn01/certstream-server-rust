@@ -1,3 +1,62 @@
+# Release Notes v1.5.6
+
+**Release date:** August 25, 2026
+
+Distribution. Prebuilt binaries, signed apt and dnf repositories, Homebrew, and crates.io. No changes to the server itself.
+
+## Installing without a container
+
+Until now the only packaged way to run this was the container image; everyone else built from source. That is now four ways, all carrying checksums:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/reloading01/certstream-server-rust/main/install.sh | sh
+```
+
+The script picks the right build for the platform, verifies the published SHA-256, and refuses to install if a checksum is missing. `PREFIX=$HOME/.local` keeps it out of `/usr/local` and away from root.
+
+Static musl builds for `x86_64` and `aarch64` Linux, plus both macOS architectures, are attached to this release. Linux builds are static, so glibc version does not matter. They carry no `target-cpu` tuning, unlike the container image, because a downloaded binary has to start on whatever CPU it lands on.
+
+## apt and dnf repositories
+
+Signed repositories, so updates arrive with the rest of the system rather than by re-downloading a file:
+
+```bash
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://reloading01.github.io/packages/key.gpg | sudo tee /etc/apt/keyrings/certstream.asc > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/certstream.asc] https://reloading01.github.io/packages/apt stable main" | sudo tee /etc/apt/sources.list.d/certstream.list
+sudo apt update && sudo apt install certstream-server-rust
+```
+
+The dnf form is on the [repository page](https://reloading01.github.io/packages/). Both are signed with `C5D7 B0D1 42A6 1EF0 FB1A BE95 462A 111C FD91 20EE`, checked on every update.
+
+Packages install a systemd unit that runs under `DynamicUser`, so nothing creates a system account, and `StateDirectory` gives it `/var/lib/certstream` for CT log positions. That file is what makes a restart resume instead of replaying from each log's head. Configuration goes in `/etc/default/certstream-server-rust`.
+
+The unit ships with the usual hardening on (`ProtectSystem=strict`, `NoNewPrivileges`, a syscall filter) and a commented `MemoryMax` line. Steady state is around 80 MB resident; leave headroom for catch-up after an outage before capping it.
+
+## Homebrew and crates.io
+
+```bash
+brew install reloading01/tap/certstream-server-rust
+```
+
+```bash
+cargo install certstream-server-rust
+```
+
+The tap formula is rewritten by the release workflow on every tag, so the version tracks releases without manual edits.
+
+## Engineering blog
+
+[certstream.dev/blog](https://certstream.dev/blog/) now carries write-ups of problems found running this against every trusted log: [transparent huge pages holding 206 MB the allocator could not return](https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html), [logs that serve tiles but publish no checkpoint](https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html), and [an HTTP/2 theory that the connection count confirmed and the throughput refuted](https://certstream.dev/blog/http2-multiplexing-vs-per-connection-rate-limits.html).
+
+## Upgrade
+
+Nothing to do. The binary is identical to v1.5.5; only packaging changed.
+
+```bash
+docker pull ghcr.io/reloading01/certstream-server-rust:1.5.6
+```
+
 # Release Notes v1.5.5
 
 **Release date:** August 25, 2026

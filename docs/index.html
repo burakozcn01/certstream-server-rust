@@ -30,6 +30,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" rel="stylesheet">
+    <link rel="alternate" type="application/rss+xml" title="certstream-server-rust blog" href="/feed.xml">
     <link rel="stylesheet" href="styles.css">
     <script type="application/ld+json">
     {
@@ -114,6 +115,7 @@
                     <li><a href="docs.html">API Docs</a></li>
                     <li><a href="quickstart.html">Quick Start</a></li>
                     <li><a href="architecture.html">Architecture</a></li>
+                    <li><a href="/blog/">Blog</a></li>
                 </ul>
             </nav>
             <button class="mobile-menu-btn" onclick="document.getElementById('mobile-nav').classList.add('active')"><span></span><span></span><span></span></button>
@@ -133,6 +135,7 @@
             <li><a href="docs.html">API Docs</a></li>
             <li><a href="quickstart.html">Quick Start</a></li>
             <li><a href="architecture.html">Architecture</a></li>
+            <li><a href="/blog/">Blog</a></li>
             <li><a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a></li>
         </ul>
     </div>
@@ -245,6 +248,35 @@
             </div>
         </section>
 
+        <section id="writing">
+            <div class="wrap">
+                <div class="section-header">
+                    <span class="eyebrow">Engineering notes</span>
+                    <h2>What running this against every trusted log taught us.</h2>
+                </div>
+                <!-- blog-teaser:start -->
+                <article class="post-list-item">
+                    <div class="post-meta"><time datetime="2026-08-25">25 August 2026</time></div>
+                    <h2><a href="/blog/http2-multiplexing-vs-per-connection-rate-limits.html">I blamed HTTP/2 multiplexing. Then I counted the connections.</a></h2>
+                    <p>Every request succeeded. The log stayed 33,000 entries behind. The mechanism I blamed was real, present, and not the problem.</p>
+                </article>
+                <article class="post-list-item">
+                    <div class="post-meta"><time datetime="2026-08-25">25 August 2026</time></div>
+                    <h2><a href="/blog/ct-logs-tiles-without-checkpoint.html">The CT logs that serve tiles but publish no checkpoint</a></h2>
+                    <p>Three logs, zero errors, 279,000 entries behind. The fast way to read them was sitting right there, behind a missing file.</p>
+                </article>
+                <article class="post-list-item">
+                    <div class="post-meta"><time datetime="2026-08-25">25 August 2026</time></div>
+                    <h2><a href="/blog/jemalloc-transparent-huge-pages-rss.html">358 MB resident, 52 MB in use: where the rest went</a></h2>
+                    <p>A service that looked like it was leaking. It wasn&#x27;t, and the fix was five settings the allocator had been running without.</p>
+                </article>
+                <!-- blog-teaser:end -->
+                <div class="center-block" style="margin-top: 28px;">
+                    <a href="/blog/" class="btn btn-secondary">All posts</a>
+                </div>
+            </div>
+        </section>
+
         <section id="support">
             <div class="wrap">
                 <div class="section-header">
@@ -273,6 +305,7 @@
             <div class="links">
                 <a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a>
                 <a href="https://github.com/reloading01/certstream-server-rust/pkgs/container/certstream-server-rust" target="_blank" rel="noopener">Container Registry</a>
+                <a href="/blog/">Blog</a>
                 <a href="docs.html">Documentation</a>
                 <a href="https://github.com/reloading01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
                 <a href="https://github.com/sponsors/reloading01" target="_blank" rel="noopener">Sponsor</a>

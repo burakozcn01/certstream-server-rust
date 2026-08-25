@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-FKL0PZPXZL"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag("js", new Date());
+      gtag("config", "G-FKL0PZPXZL");
+    </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Why jemalloc RSS is 4x the live heap: transparent huge pages</title>
+    <meta name="description" content="A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. Transparent huge pages were holding 206 MB jemalloc could not return. How to diagnose it with jemalloc stats and smaps, and the thp:never fix.">
+    <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">
+    <meta name="author" content="reloading01">
+    <meta name="keywords" content="jemalloc, transparent huge pages, THP, RSS memory, Rust memory usage, memory leak debugging, AnonHugePages, narenas, dirty_decay_ms, container memory">
+    <link rel="canonical" href="https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html">
+    <meta property="og:type" content="article">
+    <meta property="og:url" content="https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html">
+    <meta property="og:title" content="358 MB resident, 52 MB in use: where the rest went">
+    <meta property="og:description" content="A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. Transparent huge pages were holding 206 MB jemalloc could not return. How to diagnose it with jemalloc stats and smaps, and the thp:never fix.">
+    <meta property="og:site_name" content="certstream-server-rust">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="358 MB resident, 52 MB in use: where the rest went">
+    <meta name="twitter:description" content="A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. Transparent huge pages were holding 206 MB jemalloc could not return. How to diagnose it with jemalloc stats and smaps, and the thp:never fix.">
+    <meta name="theme-color" content="#b7410e">
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="alternate" type="application/rss+xml" title="certstream-server-rust blog" href="/feed.xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/styles.css">
+    <meta property="article:published_time" content="2026-08-25">
+    <meta property="article:author" content="https://github.com/reloading01">
+    <script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@type": "BlogPosting",
+    "headline": "358 MB resident, 52 MB in use: where the rest went",
+    "alternativeHeadline": "Why jemalloc RSS is 4x the live heap: transparent huge pages",
+    "description": "A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. Transparent huge pages were holding 206 MB jemalloc could not return. How to diagnose it with jemalloc stats and smaps, and the thp:never fix.",
+    "datePublished": "2026-08-25",
+    "dateModified": "2026-08-25",
+    "inLanguage": "en",
+    "author": {
+        "@type": "Person",
+        "name": "reloading01",
+        "url": "https://github.com/reloading01"
+    },
+    "publisher": {
+        "@type": "Organization",
+        "name": "certstream-server-rust",
+        "url": "https://certstream.dev"
+    },
+    "mainEntityOfPage": {
+        "@type": "WebPage",
+        "@id": "https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html"
+    },
+    "url": "https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html",
+    "keywords": "jemalloc, transparent huge pages, THP, RSS memory, Rust memory usage, memory leak debugging, AnonHugePages, narenas, dirty_decay_ms, container memory",
+    "articleSection": "Engineering",
+    "isPartOf": {
+        "@type": "Blog",
+        "name": "certstream-server-rust blog",
+        "@id": "https://certstream.dev/blog/"
+    },
+    "about": [
+        {
+            "@type": "Thing",
+            "name": "jemalloc"
+        },
+        {
+            "@type": "Thing",
+            "name": "Transparent Huge Pages"
+        },
+        {
+            "@type": "Thing",
+            "name": "Rust"
+        },
+        {
+            "@type": "Thing",
+            "name": "Memory profiling"
+        },
+        {
+            "@type": "Thing",
+            "name": "Linux kernel"
+        }
+    ]
+}
+    </script>
+    <script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+        {
+            "@type": "ListItem",
+            "position": 1,
+            "name": "Home",
+            "item": "https://certstream.dev"
+        },
+        {
+            "@type": "ListItem",
+            "position": 2,
+            "name": "Blog",
+            "item": "https://certstream.dev/blog/"
+        },
+        {
+            "@type": "ListItem",
+            "position": 3,
+            "name": "358 MB resident, 52 MB in use: where the rest went",
+            "item": "https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html"
+        }
+    ]
+}
+    </script>
+    <script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+        {
+            "@type": "Question",
+            "name": "Why is RSS so much higher than the heap in my Rust program?",
+            "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "RSS is what the kernel charges the process for; the live heap is what the allocator has handed out. Pages freed inside the allocator still count toward RSS until returned to the kernel, and transparent huge pages can prevent that return entirely. Check AnonHugePages in /proc/pid/smaps_rollup before assuming a leak."
+            }
+        },
+        {
+            "@type": "Question",
+            "name": "How do I stop jemalloc from using transparent huge pages?",
+            "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Set thp:never in jemalloc's runtime configuration, which makes it mark its own mappings MADV_NOHUGEPAGE without changing the host setting for other processes. In Rust with tikv-jemallocator, export a _rjem_malloc_conf symbol or set the _RJEM_MALLOC_CONF environment variable."
+            }
+        },
+        {
+            "@type": "Question",
+            "name": "Does THP in always mode increase memory usage?",
+            "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "It can, for allocators that free at 4 KiB granularity: a 2 MiB huge page cannot be returned while any object in it is live. In the case measured here it accounted for 206 MB of a 358 MB resident set. Workloads with large long-lived allocations often benefit from THP instead."
+            }
+        },
+        {
+            "@type": "Question",
+            "name": "How many arenas should jemalloc use in a container?",
+            "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "jemalloc defaults to four times the CPU count read from the host rather than the cgroup quota, so a container gets far more arenas than it has threads. Matching narenas to the runtime's worker thread count reduces fragmentation and arena metadata; here it halved metadata from 11.8 MB to 4.8 MB."
+            }
+        }
+    ]
+}
+    </script>
+</head>
+<body>
+    <header>
+        <div class="wrap">
+            <a href="/" class="logo">certstream-server-rust</a>
+            <nav>
+                <ul class="nav-links">
+                    <li><a href="/">Home</a></li>
+                    <li><a href="/docs.html">API Docs</a></li>
+                    <li><a href="/quickstart.html">Quick Start</a></li>
+                    <li><a href="/architecture.html">Architecture</a></li>
+                    <li><a href="/blog/" class="active">Blog</a></li>
+                </ul>
+            </nav>
+            <button class="mobile-menu-btn" onclick="document.getElementById('mobile-nav').classList.add('active')"><span></span><span></span><span></span></button>
+            <a href="https://github.com/reloading01/certstream-server-rust" class="gh-link" target="_blank" rel="noopener">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                GitHub
+            </a>
+        </div>
+    </header>
+    <div class="mobile-nav" id="mobile-nav">
+        <div class="mobile-nav-header">
+            <a href="/" class="logo">certstream-server-rust</a>
+            <button class="mobile-nav-close" onclick="document.getElementById('mobile-nav').classList.remove('active')">&times;</button>
+        </div>
+        <ul class="mobile-nav-links">
+            <li><a href="/">Home</a></li>
+            <li><a href="/docs.html">API Docs</a></li>
+            <li><a href="/quickstart.html">Quick Start</a></li>
+            <li><a href="/architecture.html">Architecture</a></li>
+            <li><a href="/blog/" class="active">Blog</a></li>
+            <li><a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a></li>
+        </ul>
+    </div>
+
+    <main>
+        <article class="post">
+            <div class="wrap">
+                <div class="post-header">
+                    <div class="post-meta">25 August 2026</div>
+                    <h1>358 MB resident, 52 MB in use: where the rest went</h1>
+                    <p class="standfirst">A service that looked like it was leaking. It wasn't, and the fix was five settings the allocator had been running without.</p>
+                </div>
+                <div class="prose">
+
+<p>A Certificate Transparency server I maintain had been sitting at around 130 MB resident for months. I finally got around to profiling it properly, ran it for two hours on my laptop, and watched resident memory climb to 682 MB without ever levelling off.</p>
+
+<p>That looks exactly like a leak. It wasn't one. The allocator was holding everything it should have been holding; the kernel was the one keeping the pages.</p>
+
+<h2>What the numbers looked like</h2>
+
+<p>The workload is steady and easy to reason about: 45 CT logs polled in parallel, roughly 420 certificates a second parsed and broadcast, one subscriber attached. Nothing accumulates by design. There is a dedup cache with a fifteen minute window, a thousand-entry cache for the REST endpoint, and a broadcast channel that holds a thousand messages. Add it up generously and you get maybe 60 MB.</p>
+
+<pre><code><span class="cm"># two hours, sampled every 30s</span>
+  0 min   180 MB
+  5 min   423 MB
+ 27 min   513 MB
+ 54 min   591 MB
+ 81 min   679 MB
+108 min   682 MB</code></pre>
+
+<p>The curve flattens near the end, which is the shape of something converging rather than leaking. But converging on 682 MB when you can only account for 60 MB is its own problem.</p>
+
+<h2>The hypothesis that was wrong</h2>
+
+<p>My first guess was the dedup cache. It is the one structure whose size scales with traffic: it holds a SHA-256 per certificate for fifteen minutes, and at 420 certs/s that is roughly 378,000 entries. The configured capacity said 200,000, so I assumed the cap was not being enforced and the map had quietly grown past it.</p>
+
+<p>Half right, and useless. The cap really was not being enforced (a separate bug, since fixed). But 378,000 entries of a 32 byte key, a 16 byte timestamp and hashmap overhead is about 34 MB. Even if the map had doubled, it could not explain a 600 MB gap.</p>
+
+<p>My second guess was the tile and batch buffers. Catch-up pipelines four concurrent fetches per watcher, each response is hundreds of kilobytes of JSON or a compressed tile that expands to a few megabytes, and 45 watchers doing that at once is a lot of transient allocation. Plausible, and also wrong, but it took measurement to know that.</p>
+
+<p>The thing I should have measured first, and didn't, was whether the process was actually holding that memory at all.</p>
+
+<h2>Asking the allocator</h2>
+
+<p>The server uses jemalloc. jemalloc knows exactly how much memory the application is holding, and it will tell you, but only if something asks. I wired six of its counters into the Prometheus endpoint:</p>
+
+<pre><code>certstream_jemalloc_allocated_bytes   <span class="cm">// what the app holds</span>
+certstream_jemalloc_active_bytes
+certstream_jemalloc_resident_bytes    <span class="cm">// pages backed by physical memory</span>
+certstream_jemalloc_mapped_bytes
+certstream_jemalloc_retained_bytes
+certstream_jemalloc_metadata_bytes</code></pre>
+
+<p>One detail that will bite you: jemalloc caches these numbers and only refreshes them when you advance its epoch. Read them without that and you get the values from process start, which looks like a beautifully flat heap.</p>
+
+<p>With the counters live, the picture inverted:</p>
+
+<p>The figures below come from a shorter run on the same host, once the counters were in: minutes rather than hours, so resident memory is at 358 MB on its way up rather than the 682 MB the two hour run ended at. The ratio is what matters and it holds throughout.</p>
+
+<table>
+<thead><tr><th>Measure</th><th class="num">Bytes</th></tr></thead>
+<tbody>
+<tr><td>RSS, as the kernel sees it</td><td class="num">358 MB</td></tr>
+<tr><td>jemalloc <code>resident</code></td><td class="num">95 MB</td></tr>
+<tr><td>jemalloc <code>allocated</code>, the live heap</td><td class="num">52 MB</td></tr>
+</tbody>
+</table>
+
+<p>The live heap was 52 MB, right where the arithmetic said it should be. Nothing was leaking. But the allocator only admitted to 95 MB of resident pages while the kernel was charging the process for 358 MB, and that gap is not something jemalloc's own accounting can explain.</p>
+
+<h2>Where the memory actually was</h2>
+
+<p><code>/proc/pid/smaps_rollup</code> answers this in one line, and I wish I had looked at it an hour earlier:</p>
+
+<pre><code>Rss:              358240 kB
+AnonHugePages:    <span class="hi">206848 kB</span></code></pre>
+
+<p>206 MB of the 358 was transparent huge pages. The host had THP set to <code>always</code>:</p>
+
+<pre><code>$ cat /sys/kernel/mm/transparent_hugepage/enabled
+[always] madvise never</code></pre>
+
+<p>In that mode the kernel promotes anonymous mappings into 2 MiB pages wherever it can. jemalloc allocates and frees at 4 KiB granularity, and when it wants to give memory back it does so a page at a time. A 2 MiB huge page with a single 4 KiB object still live in it cannot be returned. Under a workload that churns short-lived buffers across many threads, you end up with a lot of huge pages that are mostly free and entirely unreturnable.</p>
+
+<p>Two other defaults were compounding it. jemalloc sizes its arena count as four times the CPU count, and inside a container that reads the <em>host</em> CPU count, not the cgroup quota: 72 arenas on an 18 core machine, each with its own dirty page pool and its own decay clock, serving a runtime that only has four worker threads. And decay only advances when an arena is touched, so arenas belonging to bursty watcher tasks sat on their dirty pages indefinitely.</p>
+
+<h2>The part that convinced me</h2>
+
+<p>The same binary runs in production on a Linux box that had been up for twenty hours. I checked it expecting to see the same thing:</p>
+
+<pre><code>$ cat /sys/kernel/mm/transparent_hugepage/enabled
+always [madvise] never
+
+$ grep -E '^(Rss|AnonHugePages)' /proc/$pid/smaps_rollup
+Rss:              137436 kB
+AnonHugePages:         0 kB</code></pre>
+
+<p>Zero huge pages, 137 MB resident, twenty hours of uptime. Same code, same workload, different THP setting. That is when I stopped looking for a leak.</p>
+
+<p>This is also why nobody had reported it. Debian and Ubuntu ship THP in <code>madvise</code> mode, so their users never see it. Docker Desktop's Linux VM, RHEL derivatives and a fair number of cloud images use <code>always</code>, and their users see a process that appears to use four times the memory it does.</p>
+
+<h2>The fix</h2>
+
+<p>Five settings, embedded in the binary so they apply however it is installed:</p>
+
+<pre><code>thp:never,narenas:4,background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000</code></pre>
+
+<p><code>thp:never</code> makes jemalloc mark its own mappings <code>MADV_NOHUGEPAGE</code>, which opts the allocator out without touching anything else on the host. <code>narenas:4</code> matches the runtime's actual thread count instead of the host's core count. <code>background_thread:true</code> gives idle arenas a purger, since the decay timer alone only fires when someone allocates.</p>
+
+<p>In Rust with <code>tikv-jemallocator</code>, the way to ship a default is an exported symbol, remembering that the crate builds jemalloc with a <code>_rjem_</code> prefix:</p>
+
+<pre><code>#[cfg(all(not(target_env = "msvc"), target_os = "linux"))]
+#[used]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static MALLOC_CONF: &amp;[u8] = b"thp:never,narenas:4,...\0";</code></pre>
+
+<p>Three things worth knowing about that snippet. <code>#[used]</code> is load bearing: nothing in the crate reads the symbol, jemalloc looks it up at startup, and fat LTO will otherwise drop it. The Linux guard matters too, because macOS has no THP and no pthread background thread support, so passing those options there prints two warnings to stderr on every start. And because jemalloc reads the <code>_RJEM_MALLOC_CONF</code> environment variable after the symbol, operators can still override any of it without rebuilding.</p>
+
+<h2>What it did</h2>
+
+<table>
+<thead><tr><th>Measure</th><th class="num">Before</th><th class="num">After</th></tr></thead>
+<tbody>
+<tr><td>RSS, THP <code>always</code> host</td><td class="num">358 MB</td><td class="num">83 MB</td></tr>
+<tr><td>RSS, THP <code>madvise</code> host</td><td class="num">88 MB</td><td class="num">77 MB</td></tr>
+<tr><td>AnonHugePages</td><td class="num">206 MB</td><td class="num">6 MB</td></tr>
+<tr><td>jemalloc retained</td><td class="num">116 MB</td><td class="num">34 MB</td></tr>
+<tr><td>Arena metadata</td><td class="num">11.8 MB</td><td class="num">4.8 MB</td></tr>
+<tr><td>Live heap</td><td class="num">52 MB</td><td class="num">49 MB</td></tr>
+</tbody>
+</table>
+
+<p>The live heap did not move, which is the whole point. Nothing about how the program uses memory changed. The pages just started going back.</p>
+
+<p>The <code>madvise</code> host improved too, by about 11 MB, which is the arena and decay settings doing their smaller share of the work.</p>
+
+<h2>What I'd tell you to take from this</h2>
+
+<p>RSS answers "what is this process being charged for". It does not answer "what is this process holding", and on a machine with THP enabled those two numbers can differ by a factor of four with nothing wrong. If your allocator can report its own live heap, export it next to RSS and put both on the same graph. The gap between them is the diagnosis.</p>
+
+<p>Check <code>/sys/kernel/mm/transparent_hugepage/enabled</code> before you believe a memory graph, especially one from a container on a developer laptop. A bug that only reproduces on <code>always</code> hosts will look intermittent and machine-specific, which is the worst kind of bug to chase.</p>
+
+<p>And if you make an allocator swap, configure it in the same commit. jemalloc had been the global allocator in this project for two releases with no configuration at all, which meant it was running with arena counts derived from whatever machine it landed on and a decay policy that never ran on idle arenas. The swap was the right call; leaving it at defaults quietly undid most of the benefit.</p>
+
+<p class="post-footer">The code is <a href="https://github.com/reloading01/certstream-server-rust">certstream-server-rust</a>, a Certificate Transparency log streaming server. The allocator settings landed in <a href="https://github.com/reloading01/certstream-server-rust/releases/tag/v1.5.5">v1.5.5</a> along with the jemalloc metrics.</p>
+
+                </div>
+            </div>
+        </article>
+    </main>
+    <footer>
+        <div class="wrap">
+            <div class="links">
+                <a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a>
+                <a href="/blog/">Blog</a>
+                <a href="/docs.html">Documentation</a>
+                <a href="/feed.xml">RSS</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
+                <a href="https://github.com/sponsors/reloading01" target="_blank" rel="noopener">Sponsor</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+            </div>
+            <span class="colophon">certstream-server-rust</span>
+        </div>
+    </footer>
+</body>
+</html>

@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-FKL0PZPXZL"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag("js", new Date());
+      gtag("config", "G-FKL0PZPXZL");
+    </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reading Certificate Transparency tiles without a checkpoint</title>
+    <meta name="description" content="Three CT logs were falling 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. How to read tiles with the tree size from get-sth, and the three failures that only appeared against live logs.">
+    <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">
+    <meta name="author" content="reloading01">
+    <meta name="keywords" content="certificate transparency, static-ct-api, CT tiles, get-entries, get-sth, CT log monitoring, RFC 6962, tile protocol, TrustAsia, CT log lag">
+    <link rel="canonical" href="https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html">
+    <meta property="og:type" content="article">
+    <meta property="og:url" content="https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html">
+    <meta property="og:title" content="The CT logs that serve tiles but publish no checkpoint">
+    <meta property="og:description" content="Three CT logs were falling 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. How to read tiles with the tree size from get-sth, and the three failures that only appeared against live logs.">
+    <meta property="og:site_name" content="certstream-server-rust">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="The CT logs that serve tiles but publish no checkpoint">
+    <meta name="twitter:description" content="Three CT logs were falling 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. How to read tiles with the tree size from get-sth, and the three failures that only appeared against live logs.">
+    <meta name="theme-color" content="#b7410e">
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="alternate" type="application/rss+xml" title="certstream-server-rust blog" href="/feed.xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/styles.css">
+    <meta property="article:published_time" content="2026-08-25">
+    <meta property="article:author" content="https://github.com/reloading01">
+    <script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@type": "BlogPosting",
+    "headline": "The CT logs that serve tiles but publish no checkpoint",
+    "alternativeHeadline": "Reading Certificate Transparency tiles without a checkpoint",
+    "description": "Three CT logs were falling 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. How to read tiles with the tree size from get-sth, and the three failures that only appeared against live logs.",
+    "datePublished": "2026-08-25",
+    "dateModified": "2026-08-25",
+    "inLanguage": "en",
+    "author": {
+        "@type": "Person",
+        "name": "reloading01",
+        "url": "https://github.com/reloading01"
+    },
+    "publisher": {
+        "@type": "Organization",
+        "name": "certstream-server-rust",
+        "url": "https://certstream.dev"
+    },
+    "mainEntityOfPage": {
+        "@type": "WebPage",
+        "@id": "https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html"
+    },
+    "url": "https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html",
+    "keywords": "certificate transparency, static-ct-api, CT tiles, get-entries, get-sth, CT log monitoring, RFC 6962, tile protocol, TrustAsia, CT log lag",
+    "articleSection": "Engineering",
+    "isPartOf": {
+        "@type": "Blog",
+        "name": "certstream-server-rust blog",
+        "@id": "https://certstream.dev/blog/"
+    },
+    "about": [
+        {
+            "@type": "Thing",
+            "name": "Certificate Transparency"
+        },
+        {
+            "@type": "Thing",
+            "name": "static-ct-api"
+        },
+        {
+            "@type": "Thing",
+            "name": "RFC 6962"
+        },
+        {
+            "@type": "Thing",
+            "name": "CDN caching"
+        }
+    ]
+}
+    </script>
+    <script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+        {
+            "@type": "ListItem",
+            "position": 1,
+            "name": "Home",
+            "item": "https://certstream.dev"
+        },
+        {
+            "@type": "ListItem",
+            "position": 2,
+            "name": "Blog",
+            "item": "https://certstream.dev/blog/"
+        },
+        {
+            "@type": "ListItem",
+            "position": 3,
+            "name": "The CT logs that serve tiles but publish no checkpoint",
+            "item": "https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html"
+        }
+    ]
+}
+    </script>
+    <script type="application/ld+json">
+{
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+        {
+            "@type": "Question",
+            "name": "What is the static-ct-api tile protocol?",
+            "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "A read interface for Certificate Transparency logs where contents are published as static files instead of served by an application. Entries are grouped into data tiles of 256 at deterministic paths, with a signed checkpoint naming the tree size. Nothing is computed per request, so the read path can sit behind a CDN."
+            }
+        },
+        {
+            "@type": "Question",
+            "name": "Why is get-entries slow on some CT logs?",
+            "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "It is an application endpoint answering arbitrary index ranges, so it cannot be cached like a static file, and some operators cap entries per request. On the logs measured here, 256 entries took 25 to 31 seconds via get-entries and under a second from a warm tile."
+            }
+        },
+        {
+            "@type": "Question",
+            "name": "Can you read CT tiles from a log that publishes no checkpoint?",
+            "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes, if you take the tree size from get-sth instead. You give up verifiability because there is no signed head to check tiles against, and you must floor the head to the last complete tile since such a log is not required to serve partial tiles."
+            }
+        },
+        {
+            "@type": "Question",
+            "name": "How do I tell whether a CT log watcher is keeping up?",
+            "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Compare the watcher's current index against the log's tree size. Request success rate will not tell you: a log can return 200 to every request while you fall further behind each poll. Export the difference as a gauge and alert on growth rather than an absolute value."
+            }
+        }
+    ]
+}
+    </script>
+</head>
+<body>
+    <header>
+        <div class="wrap">
+            <a href="/" class="logo">certstream-server-rust</a>
+            <nav>
+                <ul class="nav-links">
+                    <li><a href="/">Home</a></li>
+                    <li><a href="/docs.html">API Docs</a></li>
+                    <li><a href="/quickstart.html">Quick Start</a></li>
+                    <li><a href="/architecture.html">Architecture</a></li>
+                    <li><a href="/blog/" class="active">Blog</a></li>
+                </ul>
+            </nav>
+            <button class="mobile-menu-btn" onclick="document.getElementById('mobile-nav').classList.add('active')"><span></span><span></span><span></span></button>
+            <a href="https://github.com/reloading01/certstream-server-rust" class="gh-link" target="_blank" rel="noopener">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                GitHub
+            </a>
+        </div>
+    </header>
+    <div class="mobile-nav" id="mobile-nav">
+        <div class="mobile-nav-header">
+            <a href="/" class="logo">certstream-server-rust</a>
+            <button class="mobile-nav-close" onclick="document.getElementById('mobile-nav').classList.remove('active')">&times;</button>
+        </div>
+        <ul class="mobile-nav-links">
+            <li><a href="/">Home</a></li>
+            <li><a href="/docs.html">API Docs</a></li>
+            <li><a href="/quickstart.html">Quick Start</a></li>
+            <li><a href="/architecture.html">Architecture</a></li>
+            <li><a href="/blog/" class="active">Blog</a></li>
+            <li><a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a></li>
+        </ul>
+    </div>
+
+    <main>
+        <article class="post">
+            <div class="wrap">
+                <div class="post-header">
+                    <div class="post-meta">25 August 2026</div>
+                    <h1>The CT logs that serve tiles but publish no checkpoint</h1>
+                    <p class="standfirst">Three logs, zero errors, 279,000 entries behind. The fast way to read them was sitting right there, behind a missing file.</p>
+                </div>
+                <div class="prose">
+
+<p>Three Certificate Transparency logs in my server had been falling behind for weeks. Not failing, not rate limited, not erroring: just slowly, steadily losing ground.</p>
+
+<pre><code>TrustAsia 'log2026b'   278,890 entries behind   errors: 0
+TrustAsia 'log2026a'    79,392 entries behind   errors: 0
+TrustAsia 'HETU2027'    37,898 entries behind   errors: 0</code></pre>
+
+<p>Every request was succeeding. The health check was green. The watcher was simply not able to read entries as fast as the log was writing them.</p>
+
+<h2>Nineteen of forty five</h2>
+
+<p>Before getting to those three, the wider number is worth sitting with. Over a two hour run against every Chrome- and Apple-trusted log:</p>
+
+<table>
+<thead><tr><th>Across 45 logs</th><th class="num">Count</th></tr></thead>
+<tbody>
+<tr><td>Reporting healthy</td><td class="num">45</td></tr>
+<tr><td>Healthy and more than 5,000 entries behind</td><td class="num">19</td></tr>
+<tr><td>Furthest behind, in entries</td><td class="num">1,297,126</td></tr>
+</tbody>
+</table>
+
+<p>Every one of those 19 was green. Requests were succeeding, responses were valid, error counters were at zero. Nearly half the logs I was monitoring were quietly falling behind, and the log furthest adrift was more than a million entries back, which at its fetch rate meant it would never return.</p>
+
+<p>That is because the status field answers "are requests to this log succeeding" and has no opinion on whether you are keeping up. The two questions feel like the same question right until they are not. A watcher that fetches successfully at half the rate the log is being written stays green forever while the gap grows every minute.</p>
+
+<p>I fixed the monitoring gap first: lag is now a metric rather than a subtraction you perform on an API response by hand. But knowing which logs are behind does not tell you why, and the three worst offenders had something in common.</p>
+
+<h2>Two ways to read a CT log</h2>
+
+<p>The classic interface, from RFC 6962, is <code>get-entries</code>: you ask for a range of indices and the log returns JSON. It is an application endpoint. The log has to serve it from something that knows how to answer arbitrary ranges.</p>
+
+<p>The newer interface, <a href="https://c2sp.org/static-ct-api">static-ct-api</a>, is a set of static files. Entries live in <em>data tiles</em> of 256 at fixed paths, and a signed <em>checkpoint</em> file names the current tree size. Nothing needs to be computed per request, so the whole thing sits behind a CDN.</p>
+
+<p>These three logs speak RFC 6962. They are listed as RFC 6962 in the log lists. But they also serve tile data, which I only knew because <a href="https://github.com/reloading01/certstream-server-rust/issues/14">Effy Elden filed an issue</a> pointing it out, having traced it through a ct-policy discussion where the operator confirmed the tiles are deliberate.</p>
+
+<p>So I measured both paths against the same 256 entries, near the head, on the same connection:</p>
+
+<table>
+<thead><tr><th>Path</th><th class="num">Transferred</th><th class="num">Time</th></tr></thead>
+<tbody>
+<tr><td><code>/tile/data/x010/x076/918</code></td><td class="num">189 KB</td><td class="num">5.96s cold, 0.36s warm</td></tr>
+<tr><td><code>get-entries?start=…&amp;end=…</code></td><td class="num">696 KB</td><td class="num">30.4s / 30.7s / 25.2s</td></tr>
+</tbody>
+</table>
+
+<p>Same data. One is roughly seventy times faster once the CDN has it, and transfers a quarter as much because the tiles are served compressed. Three separate <code>get-entries</code> requests took 25 to 31 seconds each, so this is not a cold-start artifact.</p>
+
+<p>The same operator runs a fourth log that does publish a checkpoint, and my server was already reading that one over tiles. It sat 1,310 entries behind while its three siblings were 38,000 to 279,000 behind. Same operator, same network path, same client. The only difference was which interface I was reading.</p>
+
+<h2>Why the tile path was not simply available</h2>
+
+<p>Because these logs return 404 for <code>/checkpoint</code>, and every tile client starts by reading the checkpoint to learn the tree size. My static-CT watcher hard-required it: fetch the checkpoint, verify its signature, take the tree size from it, then fetch tiles up to that point. No checkpoint meant no tree size, and the watcher exited after its retries.</p>
+
+<p>The operator has said they will not serve one. They publish the tree head through <code>get-sth</code>, signed, the RFC 6962 way.</p>
+
+<p>So the shape of the fix is obvious once you see it: take the tree size from <code>get-sth</code>, take the entries from the tiles. Nothing else about the tile path cares where the number came from.</p>
+
+<pre><code>static_logs:
+  - name: "TrustAsia log2026a"
+    url: "https://ct2026-a.trustasia.com/log2026a"
+    expected_log_id: "dNudWPfUfp39eHoWKpkcGM9pjafHKZGMmhiwRQ26RLw="
+    <span class="hi">tree_size_source: get_sth</span></code></pre>
+
+<h2>Three things the real logs taught me that the tests did not</h2>
+
+<p>Every unit test passed before I pointed this at production logs. Then it met the internet.</p>
+
+<h3>Load balanced heads disagree</h3>
+
+<p>Within a minute of starting, one watcher stopped advancing entirely. The tree size it read was <em>lower</em> than the tree size it had read a moment earlier.</p>
+
+<p>A static-CT watcher treats that as an integrity signal, and rightly: a signed checkpoint whose tree size regresses means an operator bug, an incomplete replica, or something worse. My code penalised the log's health and backed off, which is correct behaviour for a checkpoint.</p>
+
+<p>It is the wrong behaviour for <code>get-sth</code>. That endpoint is served by a fleet, replicas are a few entries apart at the head, and reading a slightly older head is completely routine. The guard was firing on normal operation and pushing a perfectly healthy watcher into exponential backoff.</p>
+
+<p>The fix counts the regression as a metric and re-polls, instead of penalising health. Progress is still bounded by the check that never reads tiles past the head the log reported.</p>
+
+<h3>High water marks latch onto the fastest replica</h3>
+
+<p>The same guard keeps a high water mark of the largest tree size ever seen. With a fleet behind the endpoint, that mark converges on whichever replica happens to be furthest ahead, and every subsequent read from any other replica looks like a regression. A watcher can sit still waiting for the rest of the fleet to catch up to a number one machine reported once.</p>
+
+<h3>Partial tiles are not owed to you</h3>
+
+<p>The spec requires partial tiles (<code>.p/&lt;W&gt;</code>, the incomplete tile at the head) only for tree sizes that a checkpoint was published for. A log that publishes no checkpoint owes none, and these do not serve them. Ask for one and you get a 404.</p>
+
+<p>So the head has to be floored to the last complete tile, which means the newest 0 to 255 entries wait for their tile to fill. For a firehose that is a second or two of extra latency. For a monitor watching one specific domain it is worth knowing about.</p>
+
+<h2>The part that is not a bug, just a number you have to pick</h2>
+
+<p>With all that working, one of the three logs still could not keep up. The tiles were arriving in groups of four with roughly twenty seconds between groups, which is exactly what four concurrent fetches look like when each one takes twenty seconds.</p>
+
+<p>Tiles near the head are new. A CDN has not been asked for them yet, so they miss, and a miss goes to the origin. The 0.36 second number in the table is a cache hit, and during catch-up most requests are hits because you are reading tiles the rest of the world already asked for. At the head they are all misses.</p>
+
+<p>Raising in-flight fetches from 4 to 16 took the three logs from about 50 entries per second in aggregate to 276.</p>
+
+<table>
+<thead><tr><th>Log</th><th class="num">Lag before</th><th class="num">Lag after</th></tr></thead>
+<tbody>
+<tr><td>TrustAsia 'HETU2027'</td><td class="num">37,898</td><td class="num">0</td></tr>
+<tr><td>TrustAsia 'log2026a'</td><td class="num">79,392</td><td class="num">0</td></tr>
+<tr><td>TrustAsia 'log2026b'</td><td class="num">278,890</td><td class="num">catching up</td></tr>
+</tbody>
+</table>
+
+<h2>What you give up</h2>
+
+<p>Verifiability, and it should be said plainly. There is no checkpoint, so there is no signed head to check the tiles against. Worse, you could not check them against the <code>get-sth</code> signature either: these tiles carry the static-CT <code>leaf_index</code> extension in their <code>TimestampedEntry</code>, so re-encoding a tile leaf does not reproduce the RFC 6962 Merkle leaf hash. The author of certspotter looked at the same logs and declined to support them for exactly this reason, which is the right call for a tool whose job is cryptographic monitoring.</p>
+
+<p>My server broadcasts certificates to downstream consumers. It does not verify inclusion proofs and never claimed to. For that job, trading verifiability for data you can actually keep up with is a reasonable trade, as long as it is opt-in, logged loudly at startup, and documented as unverified. It is not a trade a monitor should make.</p>
+
+<h2>The general lesson</h2>
+
+<p>The failure modes in this work did not come from my code being wrong about its own logic. They came from operator infrastructure: a load balancer behind an endpoint that the protocol treats as authoritative, a CDN whose cache behaviour differs completely between catch-up and steady state, a rate limiter keyed on something I had not thought about.</p>
+
+<p>None of them are expressible as a unit test until after you know they exist. If you are writing a client for someone else's distributed system, budget time for running it against the real thing and watching it for a while, because that is where those live. And when you build a guard against a protocol violation, ask which endpoint it is guarding: the same invariant that is sacred for a signed artifact can be routine noise one hop away.</p>
+
+<p class="post-footer">This work is in <a href="https://github.com/reloading01/certstream-server-rust">certstream-server-rust</a>, a Certificate Transparency log streaming server, released in <a href="https://github.com/reloading01/certstream-server-rust/releases/tag/v1.5.5">v1.5.5</a>. The behaviour of these logs was reported, measured and specified by Effy Elden in <a href="https://github.com/reloading01/certstream-server-rust/issues/14">issue #14</a>.</p>
+
+                </div>
+            </div>
+        </article>
+    </main>
+    <footer>
+        <div class="wrap">
+            <div class="links">
+                <a href="https://github.com/reloading01/certstream-server-rust" target="_blank" rel="noopener">GitHub</a>
+                <a href="/blog/">Blog</a>
+                <a href="/docs.html">Documentation</a>
+                <a href="/feed.xml">RSS</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/issues" target="_blank" rel="noopener">Issues</a>
+                <a href="https://github.com/sponsors/reloading01" target="_blank" rel="noopener">Sponsor</a>
+                <a href="https://github.com/reloading01/certstream-server-rust/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
+            </div>
+            <span class="colophon">certstream-server-rust</span>
+        </div>
+    </footer>
+</body>
+</html>

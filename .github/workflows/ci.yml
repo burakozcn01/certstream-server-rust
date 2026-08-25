@@ -83,3 +83,311 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Prebuilt binaries for people who do not want a container. Linux targets are
+  # static musl builds so they run on any glibc vintage; jemalloc is compiled
+  # from source, hence build-base on the musl runners.
+  #
+  # No `-C target-cpu` here on purpose. The Docker image builds with
+  # x86-64-v3 because the operator picks the host it runs on; a downloaded
+  # binary has to start on whatever CPU the user has.
+  binaries:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools musl-dev
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="certstream-server-rust-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/certstream-server-rust" "dist/${name}/"
+          cp README.md LICENSE config.example.yaml "dist/${name}/"
+          tar -czf "${name}.tar.gz" -C dist "${name}"
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          else
+            shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          fi
+          echo "archive=${name}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" "${{ steps.package.outputs.archive }}" "${{ steps.package.outputs.archive }}.sha256" --clobber
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.archive }}
+          path: ${{ steps.package.outputs.archive }}*
+
+  # .deb and .rpm for people who install services rather than run containers.
+  # Both carry the systemd unit; it uses DynamicUser, so neither package needs
+  # a maintainer script to create an account.
+  packages:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools musl-dev
+
+      - name: Install packaging tools
+        run: cargo install cargo-deb cargo-generate-rpm --locked
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Build .deb
+        run: cargo deb --no-build --target ${{ matrix.target }} --output "dist/"
+
+      - name: Build .rpm
+        run: |
+          mkdir -p dist
+          cargo generate-rpm --target ${{ matrix.target }} --output "dist/"
+
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for f in dist/*.deb dist/*.rpm; do
+            [ -e "$f" ] || continue
+            gh release upload "${GITHUB_REF_NAME}" "$f" --clobber
+          done
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.target }}
+          path: dist/*
+
+  # Pushes an updated formula to the tap repo. Needs a HOMEBREW_TAP_TOKEN
+  # secret with write access to reloading01/homebrew-tap; without it the job
+  # skips rather than failing the release.
+  homebrew:
+    needs: binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for tap token
+        id: gate
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "no HOMEBREW_TAP_TOKEN, skipping tap update"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fill in version and checksums
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          formula=packaging/homebrew/certstream-server-rust.rb
+          sed -i "s/^  version \".*\"/  version \"${version}\"/" "$formula"
+          for target in aarch64-apple-darwin x86_64-apple-darwin \
+                        aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
+            archive="certstream-server-rust-${version}-${target}.tar.gz"
+            gh release download "${GITHUB_REF_NAME}" --pattern "${archive}.sha256" --output - > sum.txt
+            sum="$(cut -d' ' -f1 < sum.txt)"
+            placeholder="REPLACE_$(echo "$target" | tr 'a-z-' 'A-Z_')"
+            sed -i "s/${placeholder}/${sum}/" "$formula"
+          done
+          grep -c REPLACE_ "$formula" && { echo "a checksum placeholder was left unfilled"; exit 1; } || true
+
+      - name: Push to tap
+        if: steps.gate.outputs.run == 'true'
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/reloading01/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp packaging/homebrew/certstream-server-rust.rb tap/Formula/
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/certstream-server-rust.rb
+          git commit -m "certstream-server-rust ${version}" || { echo "formula unchanged"; exit 0; }
+          git push
+
+  # Publishes the APT and DNF repositories to reloading01/packages (gh-pages).
+  # The branch is rewritten as a single orphan commit each time, so package
+  # files never accumulate in git history; the previous contents are carried
+  # forward so older versions stay installable.
+  #
+  # Needs APT_GPG_PRIVATE_KEY (armoured, passphrase-less) and
+  # HOMEBREW_TAP_TOKEN, reused here for write access to the packages repo.
+  repository:
+    needs: packages
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for signing key
+        id: gate
+        env:
+          KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$KEY" ] || [ -z "$TOKEN" ]; then
+            echo "signing key or token missing, skipping repository publish"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install tooling
+        if: steps.gate.outputs.run == 'true'
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils createrepo-c gnupg
+
+      - name: Import signing key
+        if: steps.gate.outputs.run == 'true'
+        env:
+          KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          echo "$KEY" | gpg --batch --import
+          echo "KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')" >> "$GITHUB_ENV"
+
+      - name: Fetch published packages
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p incoming
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern '*.deb' --pattern '*.rpm' --dir incoming
+          ls -la incoming
+
+      - name: Check out existing repository
+        if: steps.gate.outputs.run == 'true'
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone --depth 1 --branch gh-pages \
+            "https://x-access-token:${TOKEN}@github.com/reloading01/packages.git" repo
+          rm -rf repo/.git
+
+      - name: Rebuild repository metadata
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -eux
+          cd repo
+          mkdir -p apt/pool/main/c/certstream-server-rust rpm
+
+          cp ../incoming/*.deb apt/pool/main/c/certstream-server-rust/
+          cp ../incoming/*.rpm rpm/
+
+          # Keep the three newest versions per architecture; older ones are
+          # still on the releases page for anyone pinning.
+          for arch in amd64 arm64; do
+            ls -1t apt/pool/main/c/certstream-server-rust/*_${arch}.deb 2>/dev/null \
+              | tail -n +4 | xargs -r rm --
+          done
+          for arch in x86_64 aarch64; do
+            ls -1t rpm/*.${arch}.rpm 2>/dev/null | tail -n +4 | xargs -r rm --
+          done
+
+          for arch in amd64 arm64; do
+            dir="apt/dists/stable/main/binary-${arch}"
+            mkdir -p "$dir"
+            (cd apt && dpkg-scanpackages --arch "${arch}" pool/) > "${dir}/Packages"
+            gzip -9kf "${dir}/Packages"
+          done
+
+          cd apt
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=certstream-server-rust \
+            -o APT::FTPArchive::Release::Label=certstream-server-rust \
+            -o APT::FTPArchive::Release::Suite=stable \
+            -o APT::FTPArchive::Release::Codename=stable \
+            -o APT::FTPArchive::Release::Components=main \
+            -o APT::FTPArchive::Release::Architectures="amd64 arm64" \
+            release dists/stable > dists/stable/Release
+
+          gpg --batch --yes --local-user "$KEYID" \
+            --clearsign -o dists/stable/InRelease dists/stable/Release
+          gpg --batch --yes --local-user "$KEYID" \
+            -abs -o dists/stable/Release.gpg dists/stable/Release
+          cd ..
+
+          createrepo_c --update rpm/
+          gpg --batch --yes --local-user "$KEYID" \
+            --detach-sign --armor rpm/repodata/repomd.xml
+
+          gpg --armor --export "$KEYID" > key.gpg
+          touch .nojekyll
+
+      - name: Publish
+        if: steps.gate.outputs.run == 'true'
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cd repo
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "certstream-server-rust ${version}"
+          git remote add origin "https://x-access-token:${TOKEN}@github.com/reloading01/packages.git"
+          git push --force origin gh-pages
