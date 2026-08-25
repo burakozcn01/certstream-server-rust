@@ -9,7 +9,7 @@
     --surface:    #fbfaf6;
     --ink:        #1c1b16;
     --ink-2:      #55524a;
-    --ink-3:      #8c897d;
+    --ink-3:      #726f63;   /* 4.5:1 on paper */
     --line:       #e2dfd4;
     --line-2:     #d2cebf;
     --rust:       #b7410e;
@@ -26,8 +26,65 @@
     --syn-cm:  #6f6a5a;
     --syn-var: #d2ab64;
 
+    --header-bg: rgba(245,243,236,0.85);
+    --inline-code-bg: #ebe7db;
+    --surface-hover: #ffffff;
+    --code-border: #34311f;
+    --grain-1: rgba(183,65,14,0.035);
+    --grain-2: rgba(28,27,22,0.03);
+    --shadow-panel: 0 22px 48px -30px rgba(28,27,22,0.55);
+
     --maxw: 1080px;
     --radius: 10px;
+}
+
+/* ---------- dark theme ----------
+   Same warm character, inverted: ink on near-black paper rather than a cold
+   grey. Declared twice on purpose: once for people who never touch the toggle
+   and have their OS set to dark, once for an explicit choice, which has to win
+   in both directions. */
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        --paper:      #15140f;
+        --surface:    #1d1c15;
+        --ink:        #ebe7da;
+        --ink-2:      #b4ae9d;
+        --ink-3:      #918c7c;
+        --line:       #2b2922;
+        --line-2:     #3b3830;
+        --rust:       #d97f4a;
+        --rust-2:     #e7996a;
+        --code-bg:    #0e0d0a;
+        --code-panel: #191811;
+        --header-bg: rgba(21,20,15,0.85);
+        --inline-code-bg: #262419;
+        --surface-hover: #262419;
+        --code-border: #2b2920;
+        --grain-1: rgba(217,127,74,0.05);
+        --grain-2: rgba(0,0,0,0.25);
+        --shadow-panel: 0 22px 48px -30px rgba(0,0,0,0.8);
+    }
+}
+
+:root[data-theme="dark"] {
+    --paper:      #15140f;
+    --surface:    #1d1c15;
+    --ink:        #ebe7da;
+    --ink-2:      #b4ae9d;
+    --ink-3:      #918c7c;
+    --line:       #2b2922;
+    --line-2:     #3b3830;
+    --rust:       #d97f4a;
+    --rust-2:     #e7996a;
+    --code-bg:    #0e0d0a;
+    --code-panel: #191811;
+    --header-bg: rgba(21,20,15,0.85);
+    --inline-code-bg: #262419;
+    --surface-hover: #262419;
+    --code-border: #2b2920;
+    --grain-1: rgba(217,127,74,0.05);
+    --grain-2: rgba(0,0,0,0.25);
+    --shadow-panel: 0 22px 48px -30px rgba(0,0,0,0.8);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -44,9 +101,10 @@ body {
     text-rendering: optimizeLegibility;
     /* faint paper grain */
     background-image:
-        radial-gradient(circle at 20% 0%, rgba(183,65,14,0.035), transparent 45%),
-        radial-gradient(circle at 100% 100%, rgba(28,27,22,0.03), transparent 40%);
+        radial-gradient(circle at 20% 0%, var(--grain-1), transparent 45%),
+        radial-gradient(circle at 100% 100%, var(--grain-2), transparent 40%);
     background-attachment: fixed;
+    transition: background-color .18s ease, color .18s ease;
 }
 
 code, pre, .mono { font-family: 'IBM Plex Mono', monospace; }
@@ -62,7 +120,7 @@ header {
     padding: 18px 0;
     position: sticky;
     top: 0;
-    background: rgba(245,243,236,0.85);
+    background: var(--header-bg);
     backdrop-filter: blur(10px);
     z-index: 100;
 }
@@ -131,7 +189,7 @@ nav .nav-links { display: flex; gap: 30px; list-style: none; }
 
 /* ---------- hero ---------- */
 .hero {
-    padding: 96px 0 80px;
+    padding: 68px 0 56px;
     border-bottom: 1px solid var(--line);
 }
 .hero h1 {
@@ -199,24 +257,28 @@ nav .nav-links { display: flex; gap: 30px; list-style: none; }
     border: 1px solid var(--code-panel);
     border-radius: var(--radius);
     padding: 16px 18px;
-    margin-top: 44px;
+    margin-top: 32px;
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 18px;
     max-width: 680px;
-    box-shadow: 0 18px 40px -28px rgba(28,27,22,0.5);
+    box-shadow: var(--shadow-panel);
 }
 .install-box code {
     color: var(--code-ink);
     font-size: 0.88rem;
-    overflow-x: auto;
-    white-space: nowrap;
+    /* A flex item defaults to min-width:auto and refuses to shrink below its
+       content, so a long command was being clipped instead of scrolled. */
+    min-width: 0;
+    flex: 1 1 auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 .install-box code::before { content: "$ "; color: var(--rust); }
 .install-box button {
     background: var(--code-panel);
-    border: 1px solid #34311f;
+    border: 1px solid var(--code-border);
     color: var(--code-dim);
     padding: 7px 13px;
     border-radius: 6px;
@@ -229,7 +291,7 @@ nav .nav-links { display: flex; gap: 30px; list-style: none; }
 .install-box button:hover { color: var(--code-ink); border-color: #4a4630; }
 
 /* ---------- sections ---------- */
-section { padding: 84px 0; border-bottom: 1px solid var(--line); }
+section { padding: 60px 0; border-bottom: 1px solid var(--line); }
 section:last-of-type { border-bottom: none; }
 .section-header { margin-bottom: 44px; max-width: 60ch; }
 .section-header h2 {
@@ -255,7 +317,7 @@ section h3:first-of-type { margin-top: 0; }
 section > .wrap > p { color: var(--ink-2); font-size: 0.98rem; }
 section > .wrap > p code,
 .section-header p code {
-    background: #ebe7db;
+    background: var(--inline-code-bg);
     padding: 2px 6px;
     border-radius: 4px;
     color: var(--rust-2);
@@ -264,7 +326,7 @@ section > .wrap > p code,
 section > .wrap > p strong { color: var(--ink); font-weight: 600; }
 
 /* ---------- page header (inner pages) ---------- */
-.page-header { padding: 80px 0 56px; border-bottom: 1px solid var(--line); }
+.page-header { padding: 60px 0 40px; border-bottom: 1px solid var(--line); }
 .page-header h1 {
     font-family: 'Newsreader', Georgia, serif;
     font-weight: 400;
@@ -278,7 +340,7 @@ section > .wrap > p strong { color: var(--ink); font-weight: 600; }
 /* ---------- feature cards ---------- */
 .features-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .feature-item { background: var(--surface); padding: 28px 26px; transition: background .18s; }
-.feature-item:hover { background: #fff; }
+.feature-item:hover { background: var(--surface-hover); }
 .feature-item h3 {
     font-family: 'IBM Plex Sans', sans-serif;
     font-size: 1.02rem;
@@ -337,7 +399,7 @@ section > .wrap > p strong { color: var(--ink); font-weight: 600; }
 .endpoints-table td { color: var(--ink-2); }
 .endpoints-table td strong { color: var(--ink); font-weight: 600; }
 .endpoints-table code {
-    background: #ebe7db;
+    background: var(--inline-code-bg);
     padding: 3px 7px;
     border-radius: 4px;
     color: var(--rust-2);
@@ -351,12 +413,12 @@ section > .wrap > p strong { color: var(--ink); font-weight: 600; }
     border: 1px solid var(--code-panel);
     border-radius: var(--radius);
     overflow: hidden;
-    box-shadow: 0 18px 40px -30px rgba(28,27,22,0.45);
+    box-shadow: var(--shadow-panel);
 }
 .code-example-header {
     background: var(--code-panel);
     padding: 11px 16px;
-    border-bottom: 1px solid #34311f;
+    border-bottom: 1px solid var(--code-border);
     display: flex;
     align-items: center;
     gap: 9px;
@@ -377,7 +439,32 @@ section > .wrap > p strong { color: var(--ink); font-weight: 600; }
     font-size: 0.84rem;
     line-height: 1.65;
     color: var(--code-ink);
-    white-space: pre;
+    /* Shell one-liners are longer than these cards are wide. Wrapping keeps
+       the whole command visible; a horizontal scrollbar on a dark card reads
+       as a truncated command instead, which is what people reported. Line
+       breaks in the source are still honoured. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    /* Overlay scrollbars hide themselves until you scroll, which reads as a
+       truncated command. Keep the track visible wherever the platform allows. */
+    scrollbar-width: thin;
+    scrollbar-color: var(--code-dim) transparent;
+}
+.install-box code::-webkit-scrollbar,
+.code-example pre::-webkit-scrollbar { height: 8px; }
+.install-box code::-webkit-scrollbar-thumb,
+.code-example pre::-webkit-scrollbar-thumb {
+    background: var(--code-dim);
+    border-radius: 4px;
+}
+.install-box code::-webkit-scrollbar-track,
+.code-example pre::-webkit-scrollbar-track { background: transparent; }
+
+/* Commands that would otherwise run off the card wrap at any character
+   rather than disappearing. Applied where the content is a shell one-liner. */
+.code-example pre.wrap {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 .code-example .kw  { color: var(--syn-kw); }
 .code-example .fn  { color: var(--syn-fn); }
@@ -398,7 +485,7 @@ section > .wrap > p strong { color: var(--ink); font-weight: 600; }
 .info-box h4 { font-size: 0.95rem; color: var(--ink); margin: 0 0 10px; }
 .info-box p { margin: 0; color: var(--ink-2); line-height: 1.65; font-size: 0.94rem; }
 .info-box code, .step-list code, .format-card code {
-    background: #ebe7db; padding: 2px 6px; border-radius: 4px; color: var(--rust-2); font-size: 0.85em;
+    background: var(--inline-code-bg); padding: 2px 6px; border-radius: 4px; color: var(--rust-2); font-size: 0.85em;
 }
 
 .step-list { counter-reset: step; list-style: none; padding: 0; max-width: 720px; }
@@ -443,7 +530,7 @@ section > .wrap > p strong { color: var(--ink); font-weight: 600; }
 .center-block p { color: var(--ink-2); line-height: 1.7; margin-bottom: 14px; }
 
 /* ---------- footer ---------- */
-footer { padding: 56px 0; color: var(--ink-3); font-size: 0.85rem; border-top: 1px solid var(--line); }
+footer { padding: 40px 0; color: var(--ink-3); font-size: 0.85rem; border-top: 1px solid var(--line); }
 footer .wrap { display: flex; justify-content: space-between; align-items: center; gap: 24px; flex-wrap: wrap; }
 footer .links { display: flex; gap: 22px; flex-wrap: wrap; }
 footer a { color: var(--ink-2); }
@@ -469,7 +556,7 @@ footer .colophon { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; 
     .code-examples { grid-template-columns: 1fr; }
     .nav-links, .gh-link { display: none; }
     .mobile-menu-btn { display: flex; }
-    section { padding: 60px 0; }
+    section { padding: 44px 0; }
     .hero { padding: 64px 0 56px; }
 }
 
@@ -492,13 +579,27 @@ footer .colophon { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; 
    blog — long-form posts on the same paper
    ============================================================ */
 
-.post-list { padding: 56px 0 96px; }
+.post-list { padding: 40px 0 72px; }
+
+/* The blog index centres its header over the centred card column; docs pages
+   keep the left-aligned header. */
+.page-header.centered { text-align: center; }
+.page-header.centered .wrap > * { margin-inline: auto; }
+.page-header.centered p { max-width: 46rem; }
 
 .post-list-item {
-    padding: 30px 0;
-    border-bottom: 1px solid var(--line);
+    max-width: 46rem;
+    margin: 0 auto 14px;
+    padding: 24px 26px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    transition: border-color .16s ease, transform .16s ease;
 }
-.post-list-item:first-of-type { border-top: 1px solid var(--line); }
+.post-list-item:hover {
+    border-color: var(--line-2);
+    transform: translateY(-2px);
+}
 
 .post-list-item h2 {
     font-family: 'Newsreader', Georgia, serif;
@@ -524,8 +625,8 @@ footer .colophon { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; 
 
 /* The article column is narrower than the site shell: prose wants a measure
    you can actually track across, code and tables get to break out of it. */
-.post { padding: 48px 0 104px; }
-.post-header { max-width: 46rem; margin-bottom: 40px; }
+.post { padding: 40px 0 80px; }
+.post-header { max-width: 46rem; margin: 0 auto 40px; }
 
 .post-header h1 {
     font-family: 'Newsreader', Georgia, serif;
@@ -542,7 +643,7 @@ footer .colophon { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; 
     color: var(--ink-2);
 }
 
-.prose { max-width: 46rem; }
+.prose { max-width: 46rem; margin-inline: auto; }
 .prose > * + * { margin-top: 1.15em; }
 .prose p { font-size: 1.03rem; line-height: 1.72; }
 
@@ -599,7 +700,11 @@ footer .colophon { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; 
 }
 
 /* Tables and wide figures step outside the reading column on roomy screens. */
-.prose .wide { max-width: min(58rem, 100%); }
+.prose .wide {
+    max-width: min(58rem, 100%);
+    margin-inline: auto;
+    width: 100%;
+}
 
 .prose table {
     width: 100%;
@@ -632,6 +737,7 @@ footer .colophon { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; 
 
 .post-footer {
     max-width: 46rem;
+    margin-inline: auto;
     margin-top: 3.2em;
     padding-top: 1.4em;
     border-top: 1px solid var(--line);
@@ -650,4 +756,46 @@ footer .colophon { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; 
 @media (max-width: 640px) {
     .prose p { font-size: 1rem; }
     .post-list-item h2 { font-size: 1.3rem; }
+}
+
+
+/* Hero is a single centred column: a wide screen otherwise leaves the right
+   half empty, and centring reads as deliberate where a left-aligned column
+   reads as unfinished. */
+.hero-grid { display: block; }
+.hero-copy {
+    max-width: 46rem;
+    margin: 0 auto;
+    text-align: center;
+}
+.hero-copy .hero-desc { margin-inline: auto; }
+.hero-copy .hero-meta,
+.hero-copy .hero-actions { justify-content: center; }
+.hero-copy .install-box { margin-inline: auto; }
+
+
+/* ---------- theme toggle ---------- */
+.theme-toggle {
+    background: none;
+    border: 1px solid var(--line-2);
+    border-radius: 999px;
+    width: 34px;
+    height: 34px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: var(--ink-2);
+    padding: 0;
+    flex: 0 0 auto;
+    transition: color .15s ease, border-color .15s ease;
+}
+.theme-toggle:hover { color: var(--rust); border-color: var(--rust); }
+.theme-toggle svg { width: 15px; height: 15px; display: block; }
+.theme-toggle .moon { display: none; }
+:root[data-theme="dark"] .theme-toggle .moon { display: block; }
+:root[data-theme="dark"] .theme-toggle .sun { display: none; }
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .theme-toggle .moon { display: block; }
+    :root:not([data-theme="light"]) .theme-toggle .sun { display: none; }
 }

@@ -6,7 +6,7 @@
         <atom:link href="https://certstream.dev/feed.xml" rel="self" type="application/rss+xml"/>
         <description>Engineering write-ups from building a Certificate Transparency streaming server in Rust.</description>
         <language>en</language>
-        <lastBuildDate>Tue, 25 Aug 2026 15:04:30 +0000</lastBuildDate>
+        <lastBuildDate>Tue, 25 Aug 2026 20:43:46 +0000</lastBuildDate>
         <item>
             <title>I blamed HTTP/2 multiplexing. Then I counted the connections.</title>
             <link>https://certstream.dev/blog/http2-multiplexing-vs-per-connection-rate-limits.html</link>

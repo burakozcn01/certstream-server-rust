@@ -25,6 +25,26 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400;1,6..72,500&display=swap" rel="stylesheet">
     <link rel="alternate" type="application/rss+xml" title="certstream-server-rust blog" href="/feed.xml">
+    <script>
+      // Applied before first paint so the page never flashes the wrong theme.
+      (function () {
+        var saved = null;
+        try { saved = localStorage.getItem('theme'); } catch (e) {}
+        if (saved === 'dark' || saved === 'light') {
+          document.documentElement.setAttribute('data-theme', saved);
+        }
+        window.toggleTheme = function () {
+          var root = document.documentElement;
+          var current = root.getAttribute('data-theme');
+          if (!current) {
+            current = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          }
+          var next = current === 'dark' ? 'light' : 'dark';
+          root.setAttribute('data-theme', next);
+          try { localStorage.setItem('theme', next); } catch (e) {}
+        };
+      })();
+    </script>
     <link rel="stylesheet" href="styles.css">
     <script type="application/ld+json">
     {
@@ -73,6 +93,10 @@
                 </ul>
             </nav>
             <button class="mobile-menu-btn" onclick="document.getElementById('mobile-nav').classList.add('active')"><span></span><span></span><span></span></button>
+            <button class="theme-toggle" onclick="toggleTheme()" aria-label="Switch between light and dark theme" title="Switch theme">
+                <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/></svg>
+                <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>
+            </button>
             <a href="https://github.com/reloading01/certstream-server-rust" class="gh-link" target="_blank" rel="noopener">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
                 GitHub
@@ -148,7 +172,7 @@
                         <span class="lang">JSON</span>
                         <span class="tag">certificate_update</span>
                     </div>
-                    <pre>{
+                    <pre class="wrap">{
   "<span class="str">message_type</span>": "<span class="str">certificate_update</span>",
   "<span class="str">data</span>": {
     "<span class="str">update_type</span>": "<span class="str">X509LogEntry</span>",
@@ -210,7 +234,7 @@
                         <span class="lang">JSON</span>
                         <span class="tag">domains-only stream</span>
                     </div>
-                    <pre>{
+                    <pre class="wrap">{
   "<span class="str">message_type</span>": "<span class="str">dns_entries</span>",
   "<span class="str">data</span>": [
     "<span class="str">example.com</span>",
@@ -312,7 +336,7 @@
                             <span class="lang">Python</span>
                             <span class="tag">certstream</span>
                         </div>
-                        <pre><span class="cm"># pip install certstream</span>
+                        <pre class="wrap"><span class="cm"># pip install certstream</span>
 <span class="kw">import</span> certstream
 
 <span class="kw">def</span> <span class="fn">callback</span>(message, context):
@@ -327,7 +351,7 @@ certstream.<span class="fn">listen_for_events</span>(callback, url=<span class="
                             <span class="lang">Go</span>
                             <span class="tag">certstream-go</span>
                         </div>
-                        <pre><span class="kw">import</span> <span class="str">"github.com/CaliDog/certstream-go"</span>
+                        <pre class="wrap"><span class="kw">import</span> <span class="str">"github.com/CaliDog/certstream-go"</span>
 
 stream, _ := certstream.<span class="fn">CertStreamEventStream</span>(<span class="var">false</span>)
 <span class="kw">for</span> event := <span class="kw">range</span> stream {
@@ -339,7 +363,7 @@ stream, _ := certstream.<span class="fn">CertStreamEventStream</span>(<span clas
                             <span class="lang">JavaScript</span>
                             <span class="tag">Node.js</span>
                         </div>
-                        <pre><span class="kw">const</span> WebSocket = <span class="fn">require</span>(<span class="str">'ws'</span>);
+                        <pre class="wrap"><span class="kw">const</span> WebSocket = <span class="fn">require</span>(<span class="str">'ws'</span>);
 <span class="kw">const</span> ws = <span class="kw">new</span> <span class="fn">WebSocket</span>(<span class="str">'ws://localhost:8080/'</span>);
 
 ws.<span class="fn">on</span>(<span class="str">'message'</span>, (data) => {
@@ -354,7 +378,7 @@ ws.<span class="fn">on</span>(<span class="str">'message'</span>, (data) => {
                             <span class="lang">Bash</span>
                             <span class="tag">with auth</span>
                         </div>
-                        <pre><span class="cm"># WebSocket with token</span>
+                        <pre class="wrap"><span class="cm"># WebSocket with token</span>
 wscat -c ws://localhost:8080/ -H <span class="str">"Authorization: Bearer your-token"</span>
 
 <span class="cm"># SSE with token</span>
@@ -405,7 +429,7 @@ docker compose up -d</pre>
                         <span class="lang">YAML</span>
                         <span class="tag">docker-compose.yml</span>
                     </div>
-                    <pre><span class="str">services</span>:
+                    <pre class="wrap"><span class="str">services</span>:
   <span class="str">certstream</span>:
     <span class="str">image</span>: ghcr.io/reloading01/certstream-server-rust:latest
     <span class="str">ports</span>:
@@ -529,7 +553,7 @@ docker compose up -d</pre>
                         <span class="lang">YAML</span>
                         <span class="tag">config.yaml</span>
                     </div>
-                    <pre><span class="str">host</span>: <span class="str">"0.0.0.0"</span>
+                    <pre class="wrap"><span class="str">host</span>: <span class="str">"0.0.0.0"</span>
 <span class="str">port</span>: <span class="var">8080</span>
 <span class="str">log_level</span>: <span class="str">"info"</span>
 <span class="str">buffer_size</span>: <span class="var">1000</span>
