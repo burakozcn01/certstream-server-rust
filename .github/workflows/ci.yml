@@ -13,6 +13,14 @@ on:
 env:
   DOCKER_IMAGE: ghcr.io/reloading01/certstream-server-rust
 
+# Pushing twice in quick succession used to leave two multi-platform image
+# builds running against the same ref, each taking about two hours to produce
+# the same thing. Tags are excluded: a release build should never be cancelled
+# by a later one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
 permissions:
   contents: read
   packages: write
@@ -116,8 +124,11 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
+          # Cross-compiled from the arm64 runner: Intel macOS runners now sit
+          # in the queue for the better part of an hour, and the Apple
+          # toolchain targets both architectures from either host anyway.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
     runs-on: ${{ matrix.os }}
