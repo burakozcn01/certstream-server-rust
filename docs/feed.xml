@@ -6,16 +6,16 @@
         <atom:link href="https://certstream.dev/feed.xml" rel="self" type="application/rss+xml"/>
         <description>Engineering write-ups from building a Certificate Transparency streaming server in Rust.</description>
         <language>en</language>
-        <lastBuildDate>Tue, 25 Aug 2026 20:43:46 +0000</lastBuildDate>
+        <lastBuildDate>Wed, 26 Aug 2026 10:26:44 +0000</lastBuildDate>
         <item>
-            <title>I blamed HTTP/2 multiplexing. Then I counted the connections.</title>
+            <title>HTTP/2 multiplexing vs per-connection rate limits</title>
             <link>https://certstream.dev/blog/http2-multiplexing-vs-per-connection-rate-limits.html</link>
             <guid isPermaLink="true">https://certstream.dev/blog/http2-multiplexing-vs-per-connection-rate-limits.html</guid>
             <pubDate>Tue, 25 Aug 2026 09:00:00 +0000</pubDate>
             <description>Six CT logs were falling behind. HTTP/2 multiplexes every request onto one connection, so we pinned the operator to HTTP/1.1 and got three connections instead of one. Throughput did not move: 49.0 vs 50.0 entries a second. The real limit was 29 entries returned for a 1024-entry request.</description>
         </item>
         <item>
-            <title>The CT logs that serve tiles but publish no checkpoint</title>
+            <title>Reading Certificate Transparency tiles without a checkpoint</title>
             <link>https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html</link>
             <guid isPermaLink="true">https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html</guid>
             <pubDate>Tue, 25 Aug 2026 09:00:00 +0000</pubDate>

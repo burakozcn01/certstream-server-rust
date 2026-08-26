@@ -12,19 +12,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Reading Certificate Transparency tiles without a checkpoint</title>
-    <meta name="description" content="Three CT logs were falling 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. How to read tiles with the tree size from get-sth, and the three failures that only appeared against live logs.">
+    <meta name="description" content="Three CT logs were 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. Taking the tree size from get-sth makes those tiles usable, and three assumptions only broke against the live logs.">
     <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">
     <meta name="author" content="reloading01">
     <meta name="keywords" content="certificate transparency, static-ct-api, CT tiles, get-entries, get-sth, CT log monitoring, RFC 6962, tile protocol, TrustAsia, CT log lag">
     <link rel="canonical" href="https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html">
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html">
-    <meta property="og:title" content="The CT logs that serve tiles but publish no checkpoint">
-    <meta property="og:description" content="Three CT logs were falling 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. How to read tiles with the tree size from get-sth, and the three failures that only appeared against live logs.">
+    <meta property="og:title" content="Reading Certificate Transparency tiles without a checkpoint">
+    <meta property="og:description" content="Three CT logs were 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. Taking the tree size from get-sth makes those tiles usable, and three assumptions only broke against the live logs.">
     <meta property="og:site_name" content="certstream-server-rust">
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="The CT logs that serve tiles but publish no checkpoint">
-    <meta name="twitter:description" content="Three CT logs were falling 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. How to read tiles with the tree size from get-sth, and the three failures that only appeared against live logs.">
+    <meta name="twitter:title" content="Reading Certificate Transparency tiles without a checkpoint">
+    <meta name="twitter:description" content="Three CT logs were 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. Taking the tree size from get-sth makes those tiles usable, and three assumptions only broke against the live logs.">
     <meta name="theme-color" content="#b7410e">
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="alternate" type="application/rss+xml" title="certstream-server-rust blog" href="/feed.xml">
@@ -58,9 +58,9 @@
 {
     "@context": "https://schema.org",
     "@type": "BlogPosting",
-    "headline": "The CT logs that serve tiles but publish no checkpoint",
+    "headline": "Reading Certificate Transparency tiles without a checkpoint",
     "alternativeHeadline": "Reading Certificate Transparency tiles without a checkpoint",
-    "description": "Three CT logs were falling 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. How to read tiles with the tree size from get-sth, and the three failures that only appeared against live logs.",
+    "description": "Three CT logs were 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. Taking the tree size from get-sth makes those tiles usable, and three assumptions only broke against the live logs.",
     "datePublished": "2026-08-25",
     "dateModified": "2026-08-25",
     "inLanguage": "en",
@@ -126,7 +126,7 @@
         {
             "@type": "ListItem",
             "position": 3,
-            "name": "The CT logs that serve tiles but publish no checkpoint",
+            "name": "Reading Certificate Transparency tiles without a checkpoint",
             "item": "https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html"
         }
     ]
@@ -150,7 +150,7 @@
             "name": "Why is get-entries slow on some CT logs?",
             "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "It is an application endpoint answering arbitrary index ranges, so it cannot be cached like a static file, and some operators cap entries per request. On the logs measured here, 256 entries took 25 to 31 seconds via get-entries and under a second from a warm tile."
+                "text": "It is an application endpoint answering arbitrary index ranges, so it cannot be cached like a static file, and some operators cap entries per request. On the logs measured here, 256 entries took 25 to 31 seconds via get-entries and 0.36 seconds from a warm tile."
             }
         },
         {
@@ -166,7 +166,7 @@
             "name": "How do I tell whether a CT log watcher is keeping up?",
             "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "Compare the watcher's current index against the log's tree size. Request success rate will not tell you: a log can return 200 to every request while you fall further behind each poll. Export the difference as a gauge and alert on growth rather than an absolute value."
+                "text": "Compare the watcher's current index against the log's tree size. Request success rate will not tell you: across 45 logs reporting healthy, 19 were more than 5,000 entries behind and one was 1.3 million behind. Export the difference as a gauge and alert on growth rather than an absolute value."
             }
         }
     ]
@@ -216,22 +216,22 @@
         <article class="post">
             <div class="wrap">
                 <div class="post-header">
-                    <h1>The CT logs that serve tiles but publish no checkpoint</h1>
-                    <p class="standfirst">Three logs, zero errors, 279,000 entries behind. The fast way to read them was sitting right there, behind a missing file.</p>
+                    <h1>Reading Certificate Transparency tiles without a checkpoint</h1>
+                    <p class="standfirst">Three logs, zero errors, and 279,000 entries behind. The faster path was already there, behind an endpoint that returns 404.</p>
                 </div>
                 <div class="prose">
 
-<p>A Certificate Transparency log is an append-only record of every TLS certificate a public CA issues, and anyone can read one. My server reads all 45 that Chrome and Apple trust. Three of them had been falling behind for weeks: not failing, not rate limited, not erroring, just slowly and steadily losing ground.</p>
+<p>Three Certificate Transparency logs from TrustAsia had been falling behind for weeks. They weren't returning errors or rate limit responses. The watcher just wasn't reading entries as fast as the logs were growing.</p>
 
 <pre><code>TrustAsia 'log2026b'   278,890 entries behind   errors: 0
 TrustAsia 'log2026a'    79,392 entries behind   errors: 0
 TrustAsia 'HETU2027'    37,898 entries behind   errors: 0</code></pre>
 
-<p>Every request was succeeding. The health check was green. The watcher was simply not able to read entries as fast as the log was writing them.</p>
+<p>Every request was succeeding and the health checks were green, but the lag kept increasing.</p>
 
-<h2>Nineteen of forty five</h2>
+<h2>Lag wasn't part of the health check</h2>
 
-<p>Before getting to those three, the wider number is worth sitting with. Over a two hour run against every Chrome- and Apple-trusted log:</p>
+<p>I ran the server against all 45 logs trusted by Chrome and Apple for two hours.</p>
 
 <table>
 <thead><tr><th>Across 45 logs</th><th class="num">Count</th></tr></thead>
@@ -242,21 +242,23 @@ TrustAsia 'HETU2027'    37,898 entries behind   errors: 0</code></pre>
 </tbody>
 </table>
 
-<p>Every one of those 19 was green. Requests were succeeding, responses were valid, error counters were at zero. Nearly half the logs I was monitoring were quietly falling behind, and the log furthest adrift was more than a million entries back, which at its fetch rate meant it would never return.</p>
+<p>All 45 logs were considered healthy, but 19 were more than 5,000 entries behind. The worst was more than 1.2 million entries behind.</p>
 
-<p>That is because the status field answers "are requests to this log succeeding" and has no opinion on whether you are keeping up. The two questions feel like the same question right until they are not. A watcher that fetches successfully at half the rate the log is being written stays green forever while the gap grows every minute.</p>
+<p>The problem was the definition of healthy. It only told me whether requests were succeeding. It didn't tell me whether the watcher was keeping up with the log.</p>
 
-<p>I fixed the monitoring gap first: lag is now a metric rather than a subtraction you perform on an API response by hand. But knowing which logs are behind does not tell you why, and the three worst offenders had something in common.</p>
+<p>A watcher can fetch successfully all day while still falling further behind if its fetch rate is lower than the log's write rate.</p>
+
+<p>I added lag as its own metric. That made the problem visible, but I still needed to figure out why these particular logs were so slow.</p>
 
 <h2>Two ways to read a CT log</h2>
 
-<p>The classic interface, from RFC 6962, is <code>get-entries</code>: you ask for a range of indices and the log returns JSON. It is an application endpoint. The log has to serve it from something that knows how to answer arbitrary ranges.</p>
+<p>The RFC 6962 interface uses <code>get-entries</code>. You request a range of indices and the log returns JSON.</p>
 
-<p>The newer interface, <a href="https://c2sp.org/static-ct-api">static-ct-api</a>, is a set of static files. Entries live in <em>data tiles</em> of 256 at fixed paths, and a signed <em>checkpoint</em> file names the current tree size. Nothing needs to be computed per request, so the whole thing sits behind a CDN.</p>
+<p>The newer <a href="https://c2sp.org/static-ct-api">static-ct-api</a> works differently. Entries are stored in data tiles of 256 entries at fixed paths. A signed checkpoint normally provides the current tree size. Because the entry data is served as static files, it can sit behind a CDN.</p>
 
-<p>These three logs speak RFC 6962. They are listed as RFC 6962 in the log lists. But they also serve tile data, which I only knew because <a href="https://github.com/reloading01/certstream-server-rust/issues/14">Effy Elden filed an issue</a> pointing it out, having traced it through a ct-policy discussion where the operator confirmed the tiles are deliberate.</p>
+<p>These three TrustAsia logs are listed as RFC 6962 logs, but they also expose static-ct-api tiles. I found out about that after <a href="https://github.com/reloading01/certstream-server-rust/issues/14">Effy Elden opened an issue</a> and pointed to a ct-policy discussion where the operator confirmed that the tiles were intentional.</p>
 
-<p>So I measured both paths against the same 256 entries, near the head, on the same connection:</p>
+<p>I compared both paths for the same 256 entries near the head:</p>
 
 <table>
 <thead><tr><th>Path</th><th class="num">Transferred</th><th class="num">Time</th></tr></thead>
@@ -266,17 +268,23 @@ TrustAsia 'HETU2027'    37,898 entries behind   errors: 0</code></pre>
 </tbody>
 </table>
 
-<p>Same data. One is roughly seventy times faster once the CDN has it, and transfers a quarter as much because the tiles are served compressed. Three separate <code>get-entries</code> requests took 25 to 31 seconds each, so this is not a cold-start artifact.</p>
+<p>A warm tile took 0.36 seconds. The same entries through <code>get-entries</code> took between 25 and 31 seconds.</p>
 
-<p>The same operator runs a fourth log that does publish a checkpoint, and my server was already reading that one over tiles. It sat 1,310 entries behind while its three siblings were 38,000 to 279,000 behind. Same operator, same network path, same client. The only difference was which interface I was reading.</p>
+<p>The tile response was also much smaller because it was compressed.</p>
 
-<h2>Why the tile path was not simply available</h2>
+<p>The same operator has another log that publishes a checkpoint, and my server was already reading that one through tiles. It was only 1,310 entries behind while the other three were between roughly 38,000 and 279,000 behind.</p>
 
-<p>Because these logs return 404 for <code>/checkpoint</code>, and every tile client starts by reading the checkpoint to learn the tree size. My static-CT watcher hard-required it: fetch the checkpoint, verify its signature, take the tree size from it, then fetch tiles up to that point. No checkpoint meant no tree size, and the watcher exited after its retries.</p>
+<h2>The missing checkpoint</h2>
 
-<p>The operator has said they will not serve one. They publish the tree head through <code>get-sth</code>, signed, the RFC 6962 way.</p>
+<p>Normally a static-CT client starts by fetching <code>/checkpoint</code>. The checkpoint provides the tree size and can be verified before the client starts fetching tiles.</p>
 
-<p>So the shape of the fix is obvious once you see it: take the tree size from <code>get-sth</code>, take the entries from the tiles. Nothing else about the tile path cares where the number came from.</p>
+<p>These logs return 404 for <code>/checkpoint</code>.</p>
+
+<p>My tile watcher required a checkpoint, so it couldn't use the tiles even though the tile data itself was available.</p>
+
+<p>The logs do publish their tree size through the RFC 6962 <code>get-sth</code> endpoint.</p>
+
+<p>So I added an option to use <code>get-sth</code> as the source of the tree size while still fetching the actual entries from tiles:</p>
 
 <pre><code>static_logs:
   - name: "TrustAsia log2026a"
@@ -284,37 +292,53 @@ TrustAsia 'HETU2027'    37,898 entries behind   errors: 0</code></pre>
     expected_log_id: "dNudWPfUfp39eHoWKpkcGM9pjafHKZGMmhiwRQ26RLw="
     <span class="hi">tree_size_source: get_sth</span></code></pre>
 
-<h2>Three things the real logs taught me that the tests did not</h2>
+<p>That was enough to make the basic approach work, but running it against the real logs exposed a few cases I hadn't accounted for.</p>
 
-<p>Every unit test passed before I pointed this at production logs. Then it met the internet.</p>
+<h2><code>get-sth</code> can move backwards</h2>
 
-<h3>Load balanced heads disagree</h3>
+<p>Soon after starting, one watcher stopped making progress because the tree size returned by <code>get-sth</code> was slightly lower than a value it had returned earlier.</p>
 
-<p>Within a minute of starting, one watcher stopped advancing entirely. The tree size it read was <em>lower</em> than the tree size it had read a moment earlier.</p>
+<p>For a signed static-CT checkpoint, a decreasing tree size is something worth treating seriously. My existing code marked the log unhealthy and backed off.</p>
 
-<p>A static-CT watcher treats that as an integrity signal, and rightly: a signed checkpoint whose tree size regresses means an operator bug, an incomplete replica, or something worse. My code penalised the log's health and backed off, which is correct behaviour for a checkpoint.</p>
+<p>That behaviour didn't work well with <code>get-sth</code>.</p>
 
-<p>It is the wrong behaviour for <code>get-sth</code>. That endpoint is served by a fleet, replicas are a few entries apart at the head, and reading a slightly older head is completely routine. The guard was firing on normal operation and pushing a perfectly healthy watcher into exponential backoff.</p>
+<p>The endpoint is served by multiple replicas, and those replicas can be a few entries apart near the head. One request can therefore return a slightly smaller tree than the previous request.</p>
 
-<p>The fix counts the regression as a metric and re-polls, instead of penalising health. Progress is still bounded by the check that never reads tiles past the head the log reported.</p>
+<p>I changed the <code>get-sth</code> path so that a regression is counted as a metric and re-polled instead of immediately affecting log health. The watcher still never fetches beyond the tree size reported by the log.</p>
 
-<h3>High water marks latch onto the fastest replica</h3>
+<h2>The high water mark had the same problem</h2>
 
-<p>The same guard keeps a high water mark of the largest tree size ever seen. With a fleet behind the endpoint, that mark converges on whichever replica happens to be furthest ahead, and every subsequent read from any other replica looks like a regression. A watcher can sit still waiting for the rest of the fleet to catch up to a number one machine reported once.</p>
+<p>The watcher also kept the largest tree size it had ever seen.</p>
 
-<h3>Partial tiles are not owed to you</h3>
+<p>With multiple replicas behind the endpoint, that value eventually comes from whichever replica happens to be furthest ahead. Requests that later hit another replica then appear to be regressions.</p>
 
-<p>The spec requires partial tiles (<code>.p/&lt;W&gt;</code>, the incomplete tile at the head) only for tree sizes that a checkpoint was published for. A log that publishes no checkpoint owes none, and these do not serve them. Ask for one and you get a 404.</p>
+<p>That can leave the watcher waiting for the other replicas to catch up to a value returned by one replica earlier.</p>
 
-<p>So the head has to be floored to the last complete tile, which means the newest 0 to 255 entries wait for their tile to fill. For a firehose that is a second or two of extra latency. For a monitor watching one specific domain it is worth knowing about.</p>
+<p>The assumption made sense for a checkpoint, but not for a load-balanced <code>get-sth</code> endpoint.</p>
 
-<h2>The part that is not a bug, just a number you have to pick</h2>
+<h2>No checkpoint also means no guaranteed partial tiles</h2>
 
-<p>With all that working, one of the three logs still could not keep up. The tiles were arriving in groups of four with roughly twenty seconds between groups, which is exactly what four concurrent fetches look like when each one takes twenty seconds.</p>
+<p>There was another difference at the head of the log.</p>
 
-<p>Tiles near the head are new. A CDN has not been asked for them yet, so they miss, and a miss goes to the origin. The 0.36 second number in the table is a cache hit, and during catch-up most requests are hits because you are reading tiles the rest of the world already asked for. At the head they are all misses.</p>
+<p>The static-ct-api specification requires partial tiles, such as <code>.p/&lt;W&gt;</code>, for tree sizes that have a published checkpoint. These logs don't publish checkpoints, and they don't serve partial tiles.</p>
 
-<p>Raising in-flight fetches from 4 to 16 took the three logs from about 50 entries per second in aggregate to 276.</p>
+<p>Requesting one returns 404.</p>
+
+<p>So when the tree size comes from <code>get-sth</code>, I floor it to the last complete 256-entry tile.</p>
+
+<p>That means the newest 0 to 255 entries aren't available through this path until their tile fills. For a high-volume stream this usually adds only a small amount of latency, but it matters if you're using the stream to watch for a specific certificate as soon as it appears.</p>
+
+<h2>Increasing concurrency</h2>
+
+<p>After those changes, one of the three logs still couldn't keep up.</p>
+
+<p>Near the head, tile requests were taking roughly 20 seconds and arriving in groups of four. The watcher had four in-flight tile requests.</p>
+
+<p>The difference between catch-up and the head turned out to matter here. Old tiles are likely to already be in the CDN cache. Newly created tiles near the head often aren't, so those requests have to reach the origin.</p>
+
+<p>The 0.36 second result from earlier was a warm cache hit. Near the head, requests could be much slower.</p>
+
+<p>I increased the number of in-flight tile fetches from 4 to 16. Aggregate throughput across the three logs went from about 50 entries per second to 276.</p>
 
 <table>
 <thead><tr><th>Log</th><th class="num">Lag before</th><th class="num">Lag after</th></tr></thead>
@@ -325,19 +349,35 @@ TrustAsia 'HETU2027'    37,898 entries behind   errors: 0</code></pre>
 </tbody>
 </table>
 
-<h2>What you give up</h2>
+<p>Two logs caught up completely and the third started closing its backlog.</p>
 
-<p>Verifiability, and it should be said plainly. There is no checkpoint, so there is no signed head to check the tiles against. Worse, you could not check them against the <code>get-sth</code> signature either: these tiles carry the static-CT <code>leaf_index</code> extension in their <code>TimestampedEntry</code>, so re-encoding a tile leaf does not reproduce the RFC 6962 Merkle leaf hash. The author of certspotter looked at the same logs and declined to support them for exactly this reason, which is the right call for a tool whose job is cryptographic monitoring.</p>
+<h2>The verification tradeoff</h2>
 
-<p>My server broadcasts certificates to downstream consumers. It does not verify inclusion proofs and never claimed to. For that job, trading verifiability for data you can actually keep up with is a reasonable trade, as long as it is opt-in, logged loudly at startup, and documented as unverified. It is not a trade a monitor should make.</p>
+<p>Using tiles this way gives up an important property of the normal static-CT protocol.</p>
 
-<h2>The general lesson</h2>
+<p>There is no checkpoint, so there is no signed static-CT tree head to verify the tiles against.</p>
 
-<p>The failure modes in this work did not come from my code being wrong about its own logic. They came from operator infrastructure: a load balancer behind an endpoint that the protocol treats as authoritative, a CDN whose cache behaviour differs completely between catch-up and steady state, a rate limiter keyed on something I had not thought about.</p>
+<p>The <code>get-sth</code> signature doesn't solve that either. These tiles include the static-CT <code>leaf_index</code> extension in their <code>TimestampedEntry</code>, so re-encoding a tile entry doesn't produce the RFC 6962 Merkle leaf hash needed to verify it against the <code>get-sth</code> tree.</p>
 
-<p>None of them are expressible as a unit test until after you know they exist. If you are writing a client for someone else's distributed system, budget time for running it against the real thing and watching it for a while, because that is where those live. And when you build a guard against a protocol violation, ask which endpoint it is guarding: the same invariant that is sacred for a signed artifact can be routine noise one hop away.</p>
+<p>The author of certspotter looked at the same logs and chose not to support them for this reason. That makes sense for a tool doing cryptographic CT monitoring.</p>
 
-<p class="post-footer">This work is in <a href="https://github.com/reloading01/certstream-server-rust">certstream-server-rust</a>, a Certificate Transparency log streaming server, released in <a href="https://github.com/reloading01/certstream-server-rust/releases/tag/v1.5.5">v1.5.5</a>. The behaviour of these logs was reported, measured and specified by Effy Elden in <a href="https://github.com/reloading01/certstream-server-rust/issues/14">issue #14</a>.</p>
+<p>My server has a different job. It streams certificates to downstream consumers and doesn't verify inclusion proofs today. For that use case, I decided to allow this mode as an explicit option. It is logged at startup and documented as unverified.</p>
+
+<p>I wouldn't use the same approach in a CT monitor that depends on cryptographic verification.</p>
+
+<h2>What changed</h2>
+
+<p>There were two separate problems here.</p>
+
+<p>The first was monitoring. Successful requests didn't mean the watcher was keeping up, so lag needed to be measured directly.</p>
+
+<p>The second was how these particular logs were being read. <code>get-entries</code> was too slow to keep up, while the same entry data was available through static tiles. Using the tree size from <code>get-sth</code> made those tiles usable even without a checkpoint, with the verification limitation described above.</p>
+
+<p>Running it against the live logs also exposed assumptions that weren't obvious from tests: <code>get-sth</code> responses from different replicas can move backwards slightly, a high water mark doesn't work well across those replicas, and logs without checkpoints don't have to provide partial tiles.</p>
+
+<p>For clients that talk to external distributed systems, those details are worth testing against the actual service rather than only against a local implementation.</p>
+
+<p class="post-footer">The changes are in <a href="https://github.com/reloading01/certstream-server-rust">certstream-server-rust</a> v1.5.5. The behaviour of these logs was originally reported and measured by Effy Elden in <a href="https://github.com/reloading01/certstream-server-rust/issues/14">issue #14</a>.</p>
 
                 </div>
             </div>

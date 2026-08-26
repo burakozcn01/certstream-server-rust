@@ -12,13 +12,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Certstream API Documentation - WebSocket, SSE Endpoints</title>
-    <meta name="description" content="Complete API documentation for certstream-server-rust. Connect to real-time certificate streams via WebSocket or SSE. Code examples in Python, JavaScript, Go, and cURL. Environment variables and YAML configuration reference.">
+    <meta name="description" content="API documentation for certstream-server-rust, including WebSocket and SSE endpoints, message formats, configuration, metrics, and the optional REST API.">
     <meta name="robots" content="index, follow">
     <link rel="canonical" href="https://certstream.dev/docs.html">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://certstream.dev/docs.html">
-    <meta property="og:title" content="Certstream API Documentation - WebSocket, SSE Streaming">
-    <meta property="og:description" content="Connect to certstream via WebSocket or SSE. Real-time CT log streaming with code examples in Python, JavaScript, Go, and cURL.">
+    <meta property="og:title" content="certstream-server-rust API documentation">
+    <meta property="og:description" content="WebSocket and SSE API documentation for certstream-server-rust, including message formats, configuration, metrics, and REST endpoints.">
     <meta name="theme-color" content="#b7410e">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -51,7 +51,7 @@
         "@context": "https://schema.org",
         "@type": "WebAPI",
         "name": "Certstream API",
-        "description": "Real-time Certificate Transparency log streaming API. WebSocket and SSE endpoints for monitoring SSL/TLS certificate issuance from Certificate Transparency logs.",
+        "description": "Certificate Transparency log streaming API. WebSocket and SSE endpoints for consuming SSL/TLS certificate issuance from Certificate Transparency logs.",
         "url": "https://certstream.dev/docs.html",
         "documentation": "https://certstream.dev/docs.html",
         "provider": {
@@ -67,7 +67,7 @@
         "@context": "https://schema.org",
         "@type": "TechArticle",
         "headline": "Certstream API Documentation",
-        "description": "Complete API reference for certstream-server-rust WebSocket and SSE endpoints",
+        "description": "API reference for certstream-server-rust WebSocket and SSE endpoints, message formats, configuration, metrics, and REST API",
         "author": {
             "@type": "Person",
             "name": "reloading01"
@@ -122,8 +122,8 @@
         <div class="wrap">
             <div class="page-header">
                 <span class="eyebrow">API reference</span>
-                <h1>Connect to the certificate stream.</h1>
-                <p>Everything you need to consume certstream over WebSocket or SSE, and to configure your own server.</p>
+                <h1>Certstream API</h1>
+                <p>WebSocket and SSE endpoints for consuming the certificate stream, plus configuration for self-hosted instances.</p>
             </div>
         </div>
 
@@ -132,21 +132,21 @@
                 <div class="section-header">
                     <span class="eyebrow">Overview</span>
                     <h2>What is Certstream?</h2>
-                    <p>Real-time Certificate Transparency log aggregation.</p>
+                    <p>Certificate Transparency log aggregation over WebSocket and SSE.</p>
                 </div>
                 <div class="features-list" style="grid-template-columns: repeat(2, 1fr);">
                     <div class="feature-item">
-                        <h3>The idea</h3>
-                        <p>Certstream aggregates certificates from Certificate Transparency logs and streams them in real-time. This Rust implementation is a drop-in replacement for certstream-server (Elixir) and certstream-server-go.</p>
+                        <h3>What it does</h3>
+                        <p>Certstream reads certificates from Certificate Transparency logs and streams them to connected clients. This Rust implementation speaks the same message format as certstream-server (Elixir) and certstream-server-go, so existing clients work against it unchanged.</p>
                     </div>
                     <div class="feature-item">
-                        <h3>How it stays lean</h3>
+                        <h3>Avoiding repeated work</h3>
                         <ul>
-                            <li>Pre-serialized broadcast via <code>Arc&lt;PreSerializedMessage&gt;</code> with zero-copy <code>Utf8Bytes</code> text frames — no per-subscriber re-encoding</li>
-                            <li>Idle-server guard — JSON is skipped entirely when no clients are connected</li>
-                            <li>A single shared issuer cache across all static-CT watchers</li>
-                            <li>SIMD-accelerated JSON via <code>simd-json</code>, enabled by default</li>
-                            <li>Single binary, no runtime dependencies</li>
+                            <li>Messages are serialized once and shared between subscribers through <code>Arc&lt;PreSerializedMessage&gt;</code></li>
+                            <li>JSON serialization is skipped when no clients are connected</li>
+                            <li>Static CT watchers share one issuer certificate cache</li>
+                            <li><code>simd-json</code> is enabled by default</li>
+                            <li>The server ships as a single binary with no runtime dependencies</li>
                         </ul>
                     </div>
                 </div>
@@ -158,14 +158,14 @@
                 <div class="section-header">
                     <span class="eyebrow">Message format</span>
                     <h2>certificate_update</h2>
-                    <p>JSON structure for certificate update messages.</p>
+                    <p>The default and full streams use the <code>certificate_update</code> message type.</p>
                 </div>
                 <p style="margin-bottom: 1.4rem;">
-                    Two timestamps appear in each message: <code>seen</code> is the wall-clock time this server
-                    processed the entry, while <code>submission_timestamp</code> is the moment the CT log itself
-                    accepted the certificate and issued a Signed Certificate Timestamp (SCT) — as defined by
+                    Each message carries two timestamps. <code>seen</code> is when this server processed the entry.
+                    <code>submission_timestamp</code> is when the CT log accepted the certificate and issued the
+                    Signed Certificate Timestamp (SCT), as defined by
                     <a href="https://www.rfc-editor.org/rfc/rfc6962#section-3.1" target="_blank" rel="noopener">RFC 6962 §3.1</a>.
-                    Both are Unix timestamps (seconds since epoch, with millisecond precision).
+                    Both are Unix timestamps in seconds, with millisecond precision.
                 </p>
                 <div class="code-example" style="max-width: 900px;">
                     <div class="code-example-header">
@@ -227,7 +227,7 @@
                 <div class="section-header">
                     <span class="eyebrow">Message format</span>
                     <h2>dns_entries</h2>
-                    <p>The <code>/domains-only</code> WebSocket and <code>/sse?stream=domains</code> endpoints use a distinct schema.</p>
+                    <p>The <code>/domains-only</code> WebSocket endpoint and <code>/sse?stream=domains</code> use a smaller schema.</p>
                 </div>
                 <div class="code-example" style="max-width: 900px;">
                     <div class="code-example-header">
@@ -244,9 +244,9 @@
 }</pre>
                 </div>
                 <p style="margin-top: 1.2rem;">
-                    Unlike the full and lite streams, <code>message_type</code> is <code>"dns_entries"</code> (not <code>"certificate_update"</code>),
-                    and <code>data</code> is a bare JSON array of strings — not an object with nested fields.
-                    Use this stream when you only need domain names and want minimal bandwidth.
+                    Unlike the full and lite streams, <code>message_type</code> is <code>"dns_entries"</code> rather than
+                    <code>"certificate_update"</code>, and <code>data</code> is a JSON array of strings rather than an
+                    object with nested fields. Use this stream when you only need domain names.
                 </p>
             </div>
         </section>
@@ -255,21 +255,21 @@
             <div class="wrap">
                 <div class="section-header">
                     <span class="eyebrow">Stream types</span>
-                    <h2>Choose the right stream</h2>
-                    <p>Three output formats, one for each level of detail.</p>
+                    <h2>Stream types</h2>
+                    <p>Three output formats, at three levels of detail.</p>
                 </div>
                 <div class="features-list" style="grid-template-columns: repeat(3, 1fr);">
                     <div class="feature-item">
-                        <h3>Lite — default</h3>
-                        <p>Certificate metadata, domains, issuer info, and timestamps. No DER-encoded certificate or chain. Best for most monitoring use cases.</p>
+                        <h3>Lite (default)</h3>
+                        <p>Certificate metadata, domains, issuer information, and timestamps. Does not include the DER-encoded certificate or the chain.</p>
                     </div>
                     <div class="feature-item">
                         <h3>Full</h3>
-                        <p>Everything in the lite stream plus the base64-encoded DER certificate and full chain. Use when you need to verify or store complete certificates.</p>
+                        <p>Everything in the lite stream plus the base64-encoded DER certificate and the full chain.</p>
                     </div>
                     <div class="feature-item">
                         <h3>Domains only</h3>
-                        <p>Just the domain names — the lowest-bandwidth option. Note the schema differs: <code>message_type</code> is <code>"dns_entries"</code> and <code>data</code> is a bare array of strings.</p>
+                        <p>Domain names only. The schema differs from the other two streams: <code>message_type</code> is <code>"dns_entries"</code> and <code>data</code> is an array of strings.</p>
                     </div>
                 </div>
             </div>
@@ -279,8 +279,8 @@
             <div class="wrap">
                 <div class="section-header">
                     <span class="eyebrow">Endpoints</span>
-                    <h2>WebSocket, SSE &amp; HTTP</h2>
-                    <p>Connect over your transport of choice.</p>
+                    <h2>WebSocket, SSE, and HTTP</h2>
+                    <p>Endpoints exposed by the server.</p>
                 </div>
                 <h3>WebSocket</h3>
                 <table class="endpoints-table">
@@ -310,8 +310,8 @@
                         <tr><td><code>/example.json</code></td><td>Example message</td></tr>
                     </tbody>
                 </table>
-                <h3>REST API — opt-in</h3>
-                <p style="margin-bottom: 1rem;">Enable with <code>CERTSTREAM_API_ENABLED=true</code>.</p>
+                <h3>REST API</h3>
+                <p style="margin-bottom: 1rem;">Disabled by default. Enable with <code>CERTSTREAM_API_ENABLED=true</code>.</p>
                 <table class="endpoints-table">
                     <thead><tr><th>Endpoint</th><th>Description</th></tr></thead>
                     <tbody>
@@ -327,8 +327,8 @@
             <div class="wrap">
                 <div class="section-header">
                     <span class="eyebrow">Client examples</span>
-                    <h2>Connect from any language</h2>
-                    <p>Pick your stack and start consuming the stream.</p>
+                    <h2>Client examples</h2>
+                    <p>Consuming the stream from Python, Go, JavaScript, and the command line.</p>
                 </div>
                 <div class="code-examples">
                     <div class="code-example">
@@ -447,7 +447,7 @@ docker compose up -d</pre>
                 <div class="section-header">
                     <span class="eyebrow">Configuration</span>
                     <h2>Environment variables</h2>
-                    <p>Every setting can be driven by an environment variable.</p>
+                    <p>All of the settings below can be set through environment variables.</p>
                 </div>
 
                 <h3>General</h3>
@@ -483,7 +483,7 @@ docker compose up -d</pre>
                         <tr><td><code>CERTSTREAM_STREAM_DOMAINS_ONLY_ENABLED</code></td><td>true</td><td>Domains-only stream</td></tr>
                     </tbody>
                 </table>
-                <p style="margin-bottom: 1rem;">Disabling a stream type removes its route and skips JSON serialization entirely, saving CPU and outbound bandwidth.</p>
+                <p style="margin-bottom: 1rem;">Disabled stream types are not serialized and their routes are not registered.</p>
 
                 <h3>Connection limiting</h3>
                 <table class="endpoints-table">
@@ -500,7 +500,7 @@ docker compose up -d</pre>
                     <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
                     <tbody>
                         <tr><td><code>CERTSTREAM_AUTH_ENABLED</code></td><td>false</td><td>Enable token auth</td></tr>
-                        <tr><td><code>CERTSTREAM_AUTH_TOKENS</code></td><td>—</td><td>Comma-separated tokens</td></tr>
+                        <tr><td><code>CERTSTREAM_AUTH_TOKENS</code></td><td>none</td><td>Comma-separated tokens</td></tr>
                         <tr><td><code>CERTSTREAM_AUTH_HEADER_NAME</code></td><td>Authorization</td><td>Auth header</td></tr>
                     </tbody>
                 </table>
@@ -522,20 +522,21 @@ docker compose up -d</pre>
                         <tr><td><code>CERTSTREAM_CT_LOG_REQUEST_TIMEOUT_SECS</code></td><td>30</td><td>Request timeout</td></tr>
                         <tr><td><code>CERTSTREAM_CT_LOG_BATCH_SIZE</code></td><td>1024</td><td>Entries requested per get-entries call (servers clamp to their own max)</td></tr>
                         <tr><td><code>CERTSTREAM_CT_LOG_FETCH_CONCURRENCY</code></td><td>4</td><td>Concurrent range/tile fetches per watcher during catch-up (1-16)</td></tr>
-                        <tr><td><code>CERTSTREAM_USER_AGENT</code></td><td>certstream-server-rust/{VERSION}</td><td>User-Agent for all outbound HTTP. Some operators (e.g. Geomys) apply a more generous rate limit tier to clients that include a contact email. Blank falls back to the default.</td></tr>
-                        <tr><td><code>CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS</code></td><td>-</td><td>Comma-separated operators whose watchers fetch over HTTP/1.1 instead of HTTP/2, so each in-flight fetch carries its own per-connection quota (DigiCert)</td></tr>
+                        <tr><td><code>CERTSTREAM_USER_AGENT</code></td><td>certstream-server-rust/{VERSION}</td><td>User-Agent for all outbound HTTP. Some operators, Geomys among them, apply a higher rate limit tier to clients that include a contact email. A blank value falls back to the default.</td></tr>
+                        <tr><td><code>CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS</code></td><td>none</td><td>Comma-separated operators whose watchers fetch over HTTP/1.1 instead of HTTP/2</td></tr>
                         <tr><td><code>CERTSTREAM_STATIC_CT_CHECKPOINT_SIGNATURE</code></td><td>warn</td><td>Checkpoint signature policy: <code>warn</code> or <code>enforce</code></td></tr>
                         <tr><td><code>CERTSTREAM_DEDUP_CAPACITY</code></td><td>200000</td><td>Cross-log dedup capacity</td></tr>
                         <tr><td><code>CERTSTREAM_DEDUP_TTL_SECS</code></td><td>900</td><td>Dedup window (seconds)</td></tr>
                     </tbody>
                 </table>
+                <p style="margin-bottom: 1rem;"><code>CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS</code> changes how many TCP connections concurrent fetches use. On its own it does not imply higher throughput; see <a href="/blog/http2-multiplexing-vs-per-connection-rate-limits.html">the measurements</a>.</p>
 
                 <h3>Hot reload</h3>
                 <table class="endpoints-table">
                     <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
                     <tbody>
                         <tr><td><code>CERTSTREAM_HOT_RELOAD_ENABLED</code></td><td>false</td><td>Enable hot reload</td></tr>
-                        <tr><td><code>CERTSTREAM_HOT_RELOAD_WATCH_PATH</code></td><td>—</td><td>Config file to watch</td></tr>
+                        <tr><td><code>CERTSTREAM_HOT_RELOAD_WATCH_PATH</code></td><td>none</td><td>Configuration file to watch</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -546,7 +547,7 @@ docker compose up -d</pre>
                 <div class="section-header">
                     <span class="eyebrow">Configuration</span>
                     <h2>YAML config file</h2>
-                    <p>A full example covering every section.</p>
+                    <p>An example covering every section.</p>
                 </div>
                 <div class="code-example" style="max-width: 900px;">
                     <div class="code-example-header">
@@ -621,18 +622,18 @@ docker compose up -d</pre>
             <div class="wrap">
                 <div class="section-header">
                     <span class="eyebrow">Performance</span>
-                    <h2>What to expect under load</h2>
-                    <p>v1.5.3 vs v1.5.2 on the same host — default config, 100 concurrent WebSocket clients on the lite stream, 10-minute plateau window.</p>
+                    <h2>Performance</h2>
+                    <p>v1.5.3 compared with v1.5.2 on the same host, using the default configuration, 100 concurrent WebSocket clients on the lite stream, and a 10-minute steady-state window.</p>
                 </div>
                 <div class="stat-grid">
                     <div class="stat-cell"><div class="num">+70<span class="unit">%</span></div><div class="lbl">Sustained throughput vs v1.5.2</div></div>
                     <div class="stat-cell"><div class="num">−50<span class="unit">%</span></div><div class="lbl">CPU per delivered message</div></div>
                     <div class="stat-cell"><div class="num">0</div><div class="lbl">Copies per subscriber broadcast</div></div>
-                    <div class="stat-cell"><div class="num">flat</div><div class="lbl">RSS over time · returns to baseline after bursts</div></div>
+                    <div class="stat-cell"><div class="num">flat</div><div class="lbl">RSS over time, after startup and catch-up bursts</div></div>
                 </div>
                 <p style="margin-top: 24px; color: var(--ink-3); font-size: 0.9rem; max-width: 70ch;">
-                    Memory plateaus shortly after startup and holds flat — no growth over time, and catch-up bursts
-                    no longer park RSS at the high-water mark.
+                    These numbers describe that benchmark configuration. They are not throughput guarantees for
+                    other hosts or workloads.
                 </p>
             </div>
         </section>
@@ -642,7 +643,7 @@ docker compose up -d</pre>
                 <div class="section-header">
                     <span class="eyebrow">Observability</span>
                     <h2>Prometheus metrics</h2>
-                    <p>Key series exposed at the <code>/metrics</code> endpoint.</p>
+                    <p>Series exposed at the <code>/metrics</code> endpoint.</p>
                 </div>
                 <h3>Core</h3>
                 <table class="endpoints-table">
@@ -651,7 +652,7 @@ docker compose up -d</pre>
                         <tr><td><code>certstream_messages_sent</code></td><td>counter</td><td>Total certificate messages broadcast</td></tr>
                         <tr><td><code>certstream_parse_failures</code></td><td>counter</td><td>Failed certificate parses (RFC 6962)</td></tr>
                         <tr><td><code>certstream_ct_logs_count</code></td><td>gauge</td><td>RFC 6962 CT logs monitored</td></tr>
-                        <tr><td><code>certstream_worker_panics</code></td><td>counter</td><td>Worker panic count (auto-recovered)</td></tr>
+                        <tr><td><code>certstream_worker_panics</code></td><td>counter</td><td>Worker panics. The watcher is restarted 5 seconds later</td></tr>
                     </tbody>
                 </table>
                 <h3>Static CT</h3>
@@ -668,11 +669,11 @@ docker compose up -d</pre>
                         <tr><td><code>certstream_issuer_cache_size</code></td><td>gauge</td><td>Cached issuer certificates</td></tr>
                         <tr><td><code>certstream_duplicates_filtered</code></td><td>counter</td><td>Duplicate certificates filtered by dedup</td></tr>
                         <tr><td><code>certstream_dedup_cache_size</code></td><td>gauge</td><td>Current dedup cache entries</td></tr>
-                        <tr><td><code>certstream_dedup_effective_ttl_seconds</code></td><td>gauge</td><td>Dedup window actually in force. Drops below <code>dedup.ttl_secs</code> when the cache is over capacity</td></tr>
+                        <tr><td><code>certstream_dedup_effective_ttl_seconds</code></td><td>gauge</td><td>Deduplication window in force, which falls below <code>dedup.ttl_secs</code> when the cache is over capacity</td></tr>
                     </tbody>
                 </table>
-                <h3>Keeping up</h3>
-                <p>Health status answers whether requests are succeeding, not whether the watcher is keeping pace. A log can stay healthy while falling further behind on every poll, so alert on lag growing rather than on any absolute value: catching up after a restart is normal.</p>
+                <h3>Log lag</h3>
+                <p>A healthy log is not necessarily a log the watcher is keeping up with. Health status tells you whether requests are succeeding. Lag tells you whether the local position is falling behind the log head. For alerting, sustained growth in lag is more useful than an absolute value, since a watcher legitimately has lag while catching up after a restart.</p>
                 <table class="endpoints-table">
                     <thead><tr><th>Metric</th><th>Type</th><th>Description</th></tr></thead>
                     <tbody>
@@ -680,7 +681,7 @@ docker compose up -d</pre>
                         <tr><td><code>certstream_ct_log_rate_limited_total</code></td><td>counter</td><td>Requests answered with 429, per log</td></tr>
                         <tr><td><code>certstream_ct_log_empty_responses_total</code></td><td>counter</td><td>get-entries responses containing no entries</td></tr>
                         <tr><td><code>certstream_issuer_cache_hits</code> / <code>_misses</code></td><td>counter</td><td>Issuer cache lookups</td></tr>
-                        <tr><td><code>certstream_issuer_fetch_attempts</code></td><td>counter</td><td>Issuers actually retrieved over the network, which a miss does not imply</td></tr>
+                        <tr><td><code>certstream_issuer_fetch_attempts</code></td><td>counter</td><td>Issuers retrieved over the network, which a cache miss does not always cause</td></tr>
                     </tbody>
                 </table>
                 <h3>Bandwidth</h3>
@@ -688,24 +689,24 @@ docker compose up -d</pre>
                     <thead><tr><th>Metric</th><th>Type</th><th>Description</th></tr></thead>
                     <tbody>
                         <tr><td><code>certstream_bytes_sent_total</code></td><td>counter</td><td>Bytes written to subscribers, labelled by protocol</td></tr>
-                        <tr><td><code>certstream_bytes_serialized_total</code></td><td>counter</td><td>Bytes produced by serialization, counted once per certificate across every enabled stream format</td></tr>
+                        <tr><td><code>certstream_bytes_serialized_total</code></td><td>counter</td><td>Bytes produced during serialization</td></tr>
                     </tbody>
                 </table>
-                <p>A large gap between the two means a stream format is enabled that nobody subscribes to. Disabling it under <code>streams</code> removes that serialization entirely.</p>
+                <p>Serialization is counted once per certificate for each enabled stream format. If serialized bytes stay high for a stream nobody consumes, disable that stream type under <code>streams</code> so it is not serialized.</p>
                 <h3>Memory</h3>
-                <p>Resident memory alone cannot separate &quot;the process is holding this data&quot; from &quot;the allocator has not returned these pages yet&quot;. These answer that: a gap between <code>allocated</code> and <code>resident</code> is allocator behaviour, while growth in <code>allocated</code> is the application holding data.</p>
+                <p>RSS alone does not show how much memory the application currently has allocated. The jemalloc counters below separate the two: a gap between <code>allocated</code> and <code>resident</code> is allocator behaviour, while growth in <code>allocated</code> is the application holding data.</p>
                 <table class="endpoints-table">
                     <thead><tr><th>Metric</th><th>Type</th><th>Description</th></tr></thead>
                     <tbody>
-                        <tr><td><code>certstream_jemalloc_allocated_bytes</code></td><td>gauge</td><td>Live heap: what the process actually holds</td></tr>
-                        <tr><td><code>certstream_jemalloc_resident_bytes</code></td><td>gauge</td><td>Physically resident pages mapped by the allocator</td></tr>
-                        <tr><td><code>certstream_jemalloc_active_bytes</code></td><td>gauge</td><td>Active pages; the excess over <code>allocated</code> is size-class rounding</td></tr>
-                        <tr><td><code>certstream_jemalloc_mapped_bytes</code></td><td>gauge</td><td>Address space mapped by the allocator</td></tr>
-                        <tr><td><code>certstream_jemalloc_retained_bytes</code></td><td>gauge</td><td>Returned to the OS, virtual mapping retained</td></tr>
-                        <tr><td><code>certstream_jemalloc_metadata_bytes</code></td><td>gauge</td><td>Allocator bookkeeping; scales with arena count</td></tr>
+                        <tr><td><code>certstream_jemalloc_allocated_bytes</code></td><td>gauge</td><td>Bytes currently allocated by the application</td></tr>
+                        <tr><td><code>certstream_jemalloc_resident_bytes</code></td><td>gauge</td><td>Resident pages accounted for by jemalloc</td></tr>
+                        <tr><td><code>certstream_jemalloc_active_bytes</code></td><td>gauge</td><td>Active pages. The excess over <code>allocated</code> is size-class rounding</td></tr>
+                        <tr><td><code>certstream_jemalloc_mapped_bytes</code></td><td>gauge</td><td>Address space mapped by jemalloc</td></tr>
+                        <tr><td><code>certstream_jemalloc_retained_bytes</code></td><td>gauge</td><td>Virtual address space retained by jemalloc after the pages were returned to the OS</td></tr>
+                        <tr><td><code>certstream_jemalloc_metadata_bytes</code></td><td>gauge</td><td>jemalloc metadata, which scales with the arena count</td></tr>
                     </tbody>
                 </table>
-                <p>Steady state is around 80 MB resident at 420 certificates a second. If resident sits far above the live heap, check the host's transparent huge page setting with <code>cat /sys/kernel/mm/transparent_hugepage/enabled</code>; the reasoning is in <a href="/blog/jemalloc-transparent-huge-pages-rss.html">this write-up</a>.</p>
+                <p>The current workload settles at roughly 80 MB RSS while processing about 420 certificates per second. If process RSS is much higher than jemalloc's <code>allocated</code> or <code>resident</code> counters, check the host's Transparent Huge Pages setting with <code>cat /sys/kernel/mm/transparent_hugepage/enabled</code>. That case is described in <a href="/blog/jemalloc-transparent-huge-pages-rss.html">the jemalloc RSS write-up</a>.</p>
             </div>
         </section>
 
@@ -714,7 +715,7 @@ docker compose up -d</pre>
                 <div class="section-header">
                     <span class="eyebrow">Coverage</span>
                     <h2>CT logs monitored</h2>
-                    <p>Every Chrome- and Apple-trusted Certificate Transparency log, with cross-log deduplication.</p>
+                    <p>The server monitors Chrome- and Apple-trusted Certificate Transparency logs and deduplicates certificates that appear in more than one log.</p>
                 </div>
                 <div class="features-list" style="grid-template-columns: repeat(3, 1fr);">
                     <div class="feature-item"><h3>Google</h3><p>Argon, Xenon</p></div>

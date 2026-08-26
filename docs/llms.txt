@@ -1,27 +1,27 @@
 # certstream-server-rust
 
-> A Certificate Transparency log streaming server written in Rust. It monitors every Chrome- and Apple-trusted CT log and streams newly issued TLS certificates in real time over WebSocket and SSE. It speaks both RFC 6962 and the static-ct-api tile protocol from one binary, and is a drop-in replacement for certstream-server and certstream-server-go.
+> A Certificate Transparency log streaming server written in Rust. It monitors Chrome- and Apple-trusted CT logs and streams newly issued TLS certificates over WebSocket and SSE. It supports both RFC 6962 and static-ct-api logs in one binary and is compatible with clients written for certstream-server and certstream-server-go.
 
-Typical uses: phishing and typosquat detection, brand monitoring, attack surface discovery, threat intelligence pipelines, certificate inventory, and research on newly issued certificates.
+Typical uses include phishing and typosquat detection, brand monitoring, attack surface discovery, threat intelligence pipelines, certificate inventory, and research on newly issued certificates.
 
-Throughput on a typical deployment: around 420 certificates and 700 domain names per second, roughly 36 million certificates and 62 million domain names per day, at about 80 MB resident memory and a fifth of one CPU core.
+On one measured deployment, the server processed around 420 certificates and 700 domain names per second, or roughly 36 million certificates and 62 million domain names per day, while using about 80 MB RSS and 0.2 CPU cores.
 
 ## Docs
 
-- [Home](https://certstream.dev/): what the project is, install options, feature list
-- [API documentation](https://certstream.dev/docs.html): WebSocket and SSE endpoints, message formats, environment variables, REST API
-- [Quick start](https://certstream.dev/quickstart.html): running the server and connecting a first client
-- [Architecture](https://certstream.dev/architecture.html): ingest pipeline, broadcast path, dedup, state persistence
+- [Home](https://certstream.dev/): project overview, installation options, and features
+- [API documentation](https://certstream.dev/docs.html): WebSocket and SSE endpoints, message formats, environment variables, and REST API
+- [Quick start](https://certstream.dev/quickstart.html): running the server and connecting a client
+- [Architecture](https://certstream.dev/architecture.html): ingest pipeline, broadcast path, deduplication, and state persistence
 
 ## Engineering writing
 
-- [Why jemalloc RSS is 4x the live heap](https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html): diagnosing a 358 MB resident set against a 52 MB live heap, where transparent huge pages held 206 MB the allocator could not return, and the thp:never fix
-- [Reading Certificate Transparency tiles without a checkpoint](https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html): CT logs that serve static-ct-api tiles but return 404 for /checkpoint, reading them with the tree size from get-sth, and the failures that only appear against live logs
-- [HTTP/2 multiplexing vs per-connection rate limits](https://certstream.dev/blog/http2-multiplexing-vs-per-connection-rate-limits.html): measuring whether pinning an operator to HTTP/1.1 helps, why the connection count confirmed the mechanism but the throughput refuted the theory, and finding the real limit in what the server returns per request
+- [Why jemalloc RSS is 4x the live heap](https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html): investigating 358 MB process RSS with 52 MB reported as allocated by jemalloc, and how Transparent Huge Pages accounted for most of the gap on the affected host
+- [Reading Certificate Transparency tiles without a checkpoint](https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html): reading static-ct-api tiles from logs that return 404 for `/checkpoint`, using the tree size from `get-sth`, and handling the edge cases that appeared in production
+- [HTTP/2 multiplexing vs per-connection rate limits](https://certstream.dev/blog/http2-multiplexing-vs-per-connection-rate-limits.html): testing whether forcing HTTP/1.1 improves catch-up throughput, measuring the connection count, and finding that the main limit was the number of entries returned per request
 
 ## Source
 
 - [GitHub repository](https://github.com/reloading01/certstream-server-rust)
 - [Container image](https://github.com/reloading01/certstream-server-rust/pkgs/container/certstream-server-rust)
 - [Releases and changelog](https://github.com/reloading01/certstream-server-rust/releases)
-- [Sponsor](https://github.com/sponsors/reloading01): the project is maintained on donations
+- [Sponsor](https://github.com/sponsors/reloading01)

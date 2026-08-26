@@ -11,14 +11,14 @@
     </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Architecture - How Certstream Server Works</title>
-    <meta name="description" content="Technical architecture of certstream-server-rust. Learn how CT logs are fetched, certificates are parsed, and data flows to WebSocket and SSE clients.">
+    <title>Architecture - How certstream-server-rust works</title>
+    <meta name="description" content="How certstream-server-rust reads CT logs, parses certificates, deduplicates entries, persists state, and broadcasts messages to WebSocket and SSE clients.">
     <meta name="robots" content="index, follow">
     <link rel="canonical" href="https://certstream.dev/architecture.html">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://certstream.dev/architecture.html">
-    <meta property="og:title" content="Certstream Architecture - Technical Deep Dive">
-    <meta property="og:description" content="How certstream-server-rust works internally. CT log polling, certificate parsing, and real-time streaming architecture.">
+    <meta property="og:title" content="certstream-server-rust architecture">
+    <meta property="og:description" content="How certstream-server-rust reads CT logs, parses certificates, deduplicates entries, persists state, and broadcasts messages to clients.">
     <meta name="theme-color" content="#b7410e">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -42,6 +42,7 @@
           var next = current === 'dark' ? 'light' : 'dark';
           root.setAttribute('data-theme', next);
           try { localStorage.setItem('theme', next); } catch (e) {}
+          if (typeof window.onThemeChange === 'function') window.onThemeChange(next);
         };
       })();
     </script>
@@ -91,8 +92,8 @@
         <div class="wrap">
             <div class="page-header">
                 <span class="eyebrow">Architecture</span>
-                <h1>How certstream works.</h1>
-                <p>The path a certificate takes, from a Certificate Transparency log to your client.</p>
+                <h1>How certstream works</h1>
+                <p>The path a certificate takes, from a Certificate Transparency log to a connected client.</p>
             </div>
         </div>
 
@@ -116,17 +117,17 @@ flowchart LR
     B --> SSE["SSE"]
                 </div>
                 <div class="info-box">
-                    <h4>Zero-copy, lock-free pipeline</h4>
+                    <h4>Serialization and shared state</h4>
                     <p>
-                        Every certificate is serialized exactly once using <code>simd-json</code> (SIMD-accelerated, enabled
-                        by default) into three pre-built <code>Bytes</code> payloads (<code>full</code>, <code>lite</code>,
-                        <code>domains_only</code>), then wrapped in an <code>Arc&lt;PreSerializedMessage&gt;</code>. Each
-                        subscriber receives a pointer clone and a zero-copy <code>Utf8Bytes</code> text frame — no
-                        re-serialization, no per-client JSON re-encoding. When no clients are connected the serialize step
-                        is skipped entirely via a <code>receiver_count() == 0</code> guard. Shared state uses lock-free
-                        <code>DashMap</code> throughout; there are no global read/write mutexes in the hot path. CPU-heavy
-                        parsing runs on the blocking pool, and jemalloc keeps resident memory tracking live usage — a flat
-                        RSS plateau under load with no growth over time.
+                        Every certificate is serialized once using <code>simd-json</code> (SIMD-accelerated, enabled by
+                        default) into three <code>Bytes</code> payloads (<code>full</code>, <code>lite</code>,
+                        <code>domains_only</code>), which are then wrapped in an
+                        <code>Arc&lt;PreSerializedMessage&gt;</code>. Each subscriber receives a clone of the
+                        <code>Arc</code> and a <code>Utf8Bytes</code> text frame that borrows the same buffer, so the
+                        payload is not re-serialized or re-encoded per client. When no clients are connected, the
+                        serialization step is skipped by a <code>receiver_count() == 0</code> guard. Shared state uses
+                        <code>DashMap</code>, so there are no global read/write mutexes in the hot path. CPU-heavy parsing
+                        runs on the blocking pool. The allocator is jemalloc.
                     </p>
                 </div>
             </div>
@@ -146,7 +147,7 @@ flowchart LR
                     </li>
                     <li>
                         <h4>Spawn watchers</h4>
-                        <p>Each CT log gets its own async task (tokio spawn). Tasks run independently. If a state file exists, each watcher resumes from its saved position.</p>
+                        <p>Each CT log gets its own async task (<code>tokio::spawn</code>). Tasks run independently. If a state file exists, each watcher resumes from its saved position.</p>
                     </li>
                     <li>
                         <h4>Poll tree size</h4>
@@ -154,7 +155,7 @@ flowchart LR
                     </li>
                     <li>
                         <h4>Fetch entries</h4>
-                        <p>Entries are fetched via <code>/ct/v1/get-entries?start=X&amp;end=Y</code>, with up to <code>fetch_concurrency</code> windows pipelined per watcher during catch-up. The requested window (default: 1024) adapts to whatever page size the server actually serves, and the index only advances by the number of entries actually returned. Each request pays a token to the per-operator rate-limit bucket, so pipelining never raises the sustained request rate.</p>
+                        <p>Entries are fetched via <code>/ct/v1/get-entries?start=X&amp;end=Y</code>, with up to <code>fetch_concurrency</code> windows pipelined per watcher during catch-up. The requested window (default: 1024) adapts to whatever page size the server actually serves, and the index only advances by the number of entries actually returned. Each request pays a token to the per-operator rate-limit bucket, so pipelining does not raise the sustained request rate.</p>
                     </li>
                     <li>
                         <h4>Track health</h4>
@@ -162,7 +163,7 @@ flowchart LR
                     </li>
                     <li>
                         <h4>Save state</h4>
-                        <p>After each batch the position is recorded so the server can resume cleanly after a restart.</p>
+                        <p>After each batch the position is recorded so the server can resume after a restart.</p>
                     </li>
                 </ol>
             </div>
@@ -173,40 +174,40 @@ flowchart LR
                 <div class="section-header">
                     <span class="eyebrow">Ingest · static-CT-API</span>
                     <h2>Static CT protocol</h2>
-                    <p>Checkpoint + tile-based fetching for next-generation CT logs.</p>
+                    <p>Checkpoint and tile-based fetching for newer CT logs.</p>
                 </div>
                 <div class="info-box">
                     <h4>Why static CT?</h4>
                     <p>
                         Let's Encrypt has retired its RFC 6962 logs in favor of static, tile-based logs, where the tree is
                         served as immutable tiles instead of dynamic <code>get-entries</code> calls. Chrome has accepted
-                        static-ct-api logs since April 2025, and the format is now where most new logs are headed.
+                        static-ct-api logs since April 2025, and the format is used by many newer logs.
                     </p>
                 </div>
                 <ol class="step-list">
                     <li>
                         <h4>Fetch checkpoint</h4>
-                        <p>Polls <code>/checkpoint</code> for the current tree size. Checkpoints are signed text files carrying origin, tree size, and root hash. The log's ECDSA P-256 signature is verified against the key from the signed catalog; <code>warn</code> mode (default) counts failures, <code>enforce</code> mode rejects checkpoints whose signature fails.</p>
+                        <p>The watcher polls <code>/checkpoint</code> for the current tree size. Checkpoints are signed text files containing the origin, tree size, and root hash. The log's ECDSA P-256 signature is verified against the key from the signed catalog. In <code>warn</code> mode, the default, signature failures are counted; in <code>enforce</code> mode, checkpoints with an invalid signature are rejected.</p>
                     </li>
                     <li>
                         <h4>Calculate tile range</h4>
-                        <p>Each tile holds 256 entries. The watcher computes which tiles to fetch from the current index versus tree size, with partial-tile width validation for the last tile.</p>
+                        <p>Each tile holds 256 entries. The watcher computes which tiles to fetch from the current index and the tree size, including validation of the partial tile width at the end of the tree.</p>
                     </li>
                     <li>
                         <h4>Fetch tile data</h4>
-                        <p>Tiles are downloaded from <code>/tile/data/&lt;path&gt;</code> using hierarchical path encoding (e.g. <code>x001/234</code> for tile 1234). Tiles may be gzip-compressed, with a hard cap on decompressed size.</p>
+                        <p>Tiles are downloaded from <code>/tile/data/&lt;path&gt;</code> using hierarchical path encoding, for example <code>x001/234</code> for tile 1234. Tiles may be gzip-compressed. A hard limit is applied to the decompressed size.</p>
                     </li>
                     <li>
                         <h4>Parse binary entries</h4>
-                        <p>A binary parser extracts the timestamp, entry type (x509 / precert), DER certificate, and chain fingerprints from each entry in the tile.</p>
+                        <p>The binary parser extracts the timestamp, entry type (<code>x509</code> or <code>precert</code>), DER certificate, and chain fingerprints from each entry in the tile.</p>
                     </li>
                     <li>
                         <h4>Fetch issuer certificates</h4>
-                        <p>Chain certificates are referenced by SHA-256 fingerprint, fetched from <code>/issuer/&lt;hex&gt;</code> and stored <em>pre-parsed</em> in a single issuer cache shared by all watchers — every leaf that chains to the same intermediate reuses one parsed <code>Arc&lt;ChainCert&gt;</code> instead of re-parsing the DER. Unparseable issuer blobs are negative-cached so they are fetched at most once.</p>
+                        <p>Chain certificates are referenced by SHA-256 fingerprint and fetched from <code>/issuer/&lt;hex&gt;</code>. They are stored pre-parsed in a single issuer cache shared by all watchers, so every leaf that chains to the same intermediate reuses one parsed <code>Arc&lt;ChainCert&gt;</code> instead of parsing the DER again. Issuer blobs that cannot be parsed are negative-cached so they are fetched at most once.</p>
                     </li>
                     <li>
                         <h4>Dedup and broadcast</h4>
-                        <p>Certificates pass through the cross-log dedup filter before being serialized once and broadcast to all clients.</p>
+                        <p>Certificates pass through the cross-log deduplication filter before being serialized and broadcast to clients.</p>
                     </li>
                 </ol>
             </div>
@@ -217,7 +218,7 @@ flowchart LR
                 <div class="section-header">
                     <span class="eyebrow">Pipeline</span>
                     <h2>Cross-log deduplication</h2>
-                    <p>One certificate, many logs — collapsed to a single broadcast.</p>
+                    <p>The same certificate can appear in more than one CT log.</p>
                 </div>
                 <div class="mermaid">
 flowchart LR
@@ -229,14 +230,14 @@ flowchart LR
                 <div class="info-box">
                     <h4>How it works</h4>
                     <p>
-                        The same certificate often appears in multiple CT logs at once. The dedup filter uses a
-                        <code>DashMap&lt;[u8; 32], Instant&gt;</code> keyed by the raw 32-byte SHA-256 digest stored directly
-                        in <code>LeafCert::sha256_raw</code> — a fixed-size, stack-allocated key that avoids one heap
-                        allocation per lookup compared with a <code>String</code> key, hashed with ahash since the digest
-                        is already uniformly distributed. The first occurrence passes through;
-                        duplicates within the TTL window are discarded. The default window is 900 seconds (15 minutes) with
-                        a default capacity of 200K entries, both tunable. A background task prunes expired entries
-                        periodically rather than wiping the cache on overflow.
+                        The deduplication filter uses a <code>DashMap&lt;[u8; 32], Instant&gt;</code> keyed by the raw
+                        32-byte SHA-256 digest stored in <code>LeafCert::sha256_raw</code>. Using the fixed-size digest as
+                        the key avoids the heap allocation a <code>String</code> key would need on every lookup. The map is
+                        hashed with ahash, since the digest is already uniformly distributed. The first occurrence of a
+                        certificate passes through and duplicates received within the TTL window are discarded. The default
+                        TTL is 900 seconds (15 minutes) and the default capacity is 200,000 entries; both are configurable.
+                        A background task removes expired entries periodically rather than clearing the cache when it
+                        reaches capacity.
                     </p>
                 </div>
             </div>
@@ -247,7 +248,7 @@ flowchart LR
                 <div class="section-header">
                     <span class="eyebrow">Pipeline</span>
                     <h2>Certificate parsing</h2>
-                    <p>X.509 decoding, from CT entry to extracted fields.</p>
+                    <p>X.509 decoding, from a CT entry to the fields the server exposes.</p>
                 </div>
                 <div class="mermaid">
 flowchart LR
@@ -259,20 +260,20 @@ flowchart LR
                 <div class="info-box">
                     <h4>MerkleTreeLeaf structure (RFC 6962)</h4>
                     <p>
-                        <code>Byte 0</code> Version ·
-                        <code>Byte 1</code> LeafType ·
-                        <code>Bytes 2–9</code> Timestamp ·
-                        <code>Bytes 10–11</code> EntryType (0 = X509, 1 = Precert) ·
-                        <code>Bytes 12–14</code> Cert length ·
+                        <code>Byte 0</code> Version<br>
+                        <code>Byte 1</code> LeafType<br>
+                        <code>Bytes 2-9</code> Timestamp<br>
+                        <code>Bytes 10-11</code> EntryType (0 = X509, 1 = Precert)<br>
+                        <code>Bytes 12-14</code> Certificate length<br>
                         <code>Byte 15+</code> DER certificate
                     </p>
                 </div>
                 <div class="info-box">
                     <h4>Precert extra_data (RFC 6962)</h4>
                     <p>
-                        <code>3 bytes</code> pre-certificate length ·
-                        <code>variable</code> pre-certificate (X509 with CT poison extension) ·
-                        <code>3 bytes</code> chain length ·
+                        <code>3 bytes</code> pre-certificate length<br>
+                        <code>variable</code> pre-certificate (X509 with CT poison extension)<br>
+                        <code>3 bytes</code> chain length<br>
                         <code>variable</code> certificate chain
                     </p>
                 </div>
@@ -283,7 +284,7 @@ flowchart LR
                         <strong>Hashes:</strong> SHA1, SHA256, fingerprint<br>
                         <strong>Validity:</strong> not_before, not_after<br>
                         <strong>Extensions:</strong> SubjectAltName, KeyUsage, BasicConstraints<br>
-                        <strong>Domains:</strong> collected from CN + SAN DNS entries
+                        <strong>Domains:</strong> collected from CN and SAN DNS entries
                     </p>
                 </div>
             </div>
@@ -294,7 +295,7 @@ flowchart LR
                 <div class="section-header">
                     <span class="eyebrow">Pipeline</span>
                     <h2>Pre-serialization</h2>
-                    <p>Serialize once, broadcast to everyone.</p>
+                    <p>Messages are serialized once before being broadcast.</p>
                 </div>
                 <div class="mermaid">
 flowchart LR
@@ -304,15 +305,15 @@ flowchart LR
     D --> E["Clients"]
                 </div>
                 <div class="info-box">
-                    <h4>Serialize-once, broadcast-many</h4>
+                    <h4>Serializing once per certificate</h4>
                     <p>
-                        Instead of serializing each message per connected client, certstream serializes once per
-                        certificate into three pre-built byte payloads (<code>full</code>, <code>lite</code>,
-                        <code>domains_only</code>), wraps them in an <code>Arc&lt;PreSerializedMessage&gt;</code>, and clones
-                        only the Arc pointer to every subscriber — zero re-serialization, zero extra heap allocation per
-                        client. With 10,000 clients that is one serialization instead of 10,000. The broadcast channel uses
-                        backpressure: lagging clients skip messages rather than blocking others, and a client that falls too
-                        far behind is disconnected.
+                        Rather than serializing a message separately for each connected client, certstream serializes each
+                        certificate into three byte payloads (<code>full</code>, <code>lite</code>,
+                        <code>domains_only</code>), wraps them in an <code>Arc&lt;PreSerializedMessage&gt;</code>, and gives
+                        each subscriber a clone of the <code>Arc</code>. The number of serializations per certificate does
+                        not change with the number of connected clients. A slow client does not block the rest of the
+                        stream: a client that falls behind misses messages, and one that falls too far behind is
+                        disconnected.
                     </p>
                 </div>
             </div>
@@ -323,26 +324,26 @@ flowchart LR
                 <div class="section-header">
                     <span class="eyebrow">Output</span>
                     <h2>Stream formats</h2>
-                    <p>Three payload shapes for three use cases.</p>
+                    <p>Three payload formats are available.</p>
                 </div>
                 <div class="format-grid">
                     <div class="format-card">
                         <h4>full</h4>
                         <div class="endpoint">/full-stream</div>
-                        <p>Complete certificate data including chain and DER-encoded certificate.</p>
-                        <div class="size">~15–50 KB / message</div>
+                        <p>Complete certificate data, including the chain and the DER-encoded certificate.</p>
+                        <div class="size">~15-50 KB / message</div>
                     </div>
                     <div class="format-card">
                         <h4>lite</h4>
                         <div class="endpoint">/ (default)</div>
-                        <p>Certificate metadata without chain or DER data. Best for most use cases.</p>
-                        <div class="size">~2–5 KB / message</div>
+                        <p>Certificate metadata without the chain or DER certificate. This is the default format.</p>
+                        <div class="size">~2-5 KB / message</div>
                     </div>
                     <div class="format-card">
                         <h4>domains_only</h4>
                         <div class="endpoint">/domains-only</div>
-                        <p>Just the domain names array. Minimal bandwidth.</p>
-                        <div class="size">~100–500 B / message</div>
+                        <p>The array of domain names only.</p>
+                        <div class="size">~100-500 B / message</div>
                     </div>
                 </div>
             </div>
@@ -365,17 +366,17 @@ flowchart LR
                     <h4>State structure</h4>
                     <p>
                         Each CT log's state tracks <code>current_index</code> (last processed entry),
-                        <code>tree_size</code> (known tree size), and <code>last_success</code> (timestamp for health
-                        tracking). State is persisted periodically (every 30 s) and on shutdown to a JSON file, enabling
-                        zero-loss restarts. Both RFC 6962 and static CT positions are tracked.
+                        <code>tree_size</code> (last known tree size), and <code>last_success</code> (timestamp used for
+                        health tracking). State is written to a JSON file every 30 seconds and during shutdown. Positions
+                        are tracked for both RFC 6962 and static CT watchers.
                     </p>
                 </div>
                 <div class="info-box">
-                    <h4>Atomic dirty flag</h4>
+                    <h4>Dirty flag</h4>
                     <p>
-                        The dirty flag uses an <code>AtomicBool</code> instead of a lock, so state updates are never
-                        silently dropped. State is flushed on graceful shutdown (SIGINT / SIGTERM) and when the periodic
-                        save task is cancelled. Persistence is on by default with
+                        The dirty flag uses an <code>AtomicBool</code> rather than a lock. State is flushed on graceful
+                        shutdown (<code>SIGINT</code> / <code>SIGTERM</code>) and when the periodic save task is cancelled.
+                        Persistence is enabled by default with
                         <code>state_file: "certstream_state.json"</code>.
                     </p>
                 </div>
@@ -399,21 +400,50 @@ flowchart LR
     </footer>
 
     <script>
-        mermaid.initialize({
-            startOnLoad: true,
-            theme: 'base',
-            themeVariables: {
-                primaryColor: '#fbfaf6',
-                primaryTextColor: '#1c1b16',
-                primaryBorderColor: '#d2cebf',
-                lineColor: '#b7410e',
-                secondaryColor: '#f0ede4',
-                tertiaryColor: '#f5f3ec',
-                fontFamily: 'IBM Plex Sans',
-                fontSize: '14px'
-            },
-            flowchart: { curve: 'basis', padding: 20 }
-        });
+        // Diagram colours come from the stylesheet so they follow the active theme.
+        // Mermaid bakes them in at render time, so a theme switch needs a re-render
+        // from the original source text, which rendering has already replaced.
+        (function () {
+            var nodes = Array.prototype.slice.call(document.querySelectorAll('.mermaid'));
+            var sources = nodes.map(function (n) { return n.textContent; });
+
+            function css(name, fallback) {
+                var v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+                return v || fallback;
+            }
+
+            function render() {
+                mermaid.initialize({
+                    startOnLoad: false,
+                    theme: 'base',
+                    themeVariables: {
+                        primaryColor: css('--surface', '#fbfaf6'),
+                        primaryTextColor: css('--ink', '#1c1b16'),
+                        primaryBorderColor: css('--line-2', '#d2cebf'),
+                        lineColor: css('--rust', '#b7410e'),
+                        secondaryColor: css('--inline-code-bg', '#f0ede4'),
+                        tertiaryColor: css('--paper', '#f5f3ec'),
+                        fontFamily: 'IBM Plex Sans',
+                        fontSize: '14px'
+                    },
+                    flowchart: { curve: 'basis', padding: 20 }
+                });
+                nodes.forEach(function (n, i) {
+                    n.removeAttribute('data-processed');
+                    n.textContent = sources[i];
+                });
+                mermaid.run({ nodes: nodes });
+            }
+
+            render();
+            window.onThemeChange = render;
+            var mq = window.matchMedia('(prefers-color-scheme: dark)');
+            var onSystemChange = function () {
+                if (!document.documentElement.getAttribute('data-theme')) render();
+            };
+            if (mq.addEventListener) mq.addEventListener('change', onSystemChange);
+            else mq.addListener(onSystemChange);
+        })();
     </script>
 </body>
 </html>

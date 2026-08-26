@@ -69,14 +69,14 @@
     "blogPost": [
         {
             "@type": "BlogPosting",
-            "headline": "I blamed HTTP/2 multiplexing. Then I counted the connections.",
+            "headline": "HTTP/2 multiplexing vs per-connection rate limits",
             "datePublished": "2026-08-25",
             "url": "https://certstream.dev/blog/http2-multiplexing-vs-per-connection-rate-limits.html",
             "description": "Six CT logs were falling behind. HTTP/2 multiplexes every request onto one connection, so we pinned the operator to HTTP/1.1 and got three connections instead of one. Throughput did not move: 49.0 vs 50.0 entries a second. The real limit was 29 entries returned for a 1024-entry request."
         },
         {
             "@type": "BlogPosting",
-            "headline": "The CT logs that serve tiles but publish no checkpoint",
+            "headline": "Reading Certificate Transparency tiles without a checkpoint",
             "datePublished": "2026-08-25",
             "url": "https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html",
             "description": "Three CT logs were falling 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. Reading them with the tree size from get-sth, and the three failures that only appeared against live logs."
@@ -142,12 +142,12 @@
         <section class="post-list">
             <div class="wrap">
                 <article class="post-list-item">
-                    <h2><a href="/blog/http2-multiplexing-vs-per-connection-rate-limits.html">I blamed HTTP/2 multiplexing. Then I counted the connections.</a></h2>
-                    <p>Every request succeeded. The log stayed 33,000 entries behind. The mechanism I blamed was real, present, and not the problem.</p>
+                    <h2><a href="/blog/http2-multiplexing-vs-per-connection-rate-limits.html">HTTP/2 multiplexing vs per-connection rate limits</a></h2>
+                    <p>Every request succeeded and the log stayed 33,000 entries behind. Switching transport gave me three connections instead of one, and changed nothing.</p>
                 </article>
                 <article class="post-list-item">
-                    <h2><a href="/blog/ct-logs-tiles-without-checkpoint.html">The CT logs that serve tiles but publish no checkpoint</a></h2>
-                    <p>Three logs, zero errors, 279,000 entries behind. The fast way to read them was sitting right there, behind a missing file.</p>
+                    <h2><a href="/blog/ct-logs-tiles-without-checkpoint.html">Reading Certificate Transparency tiles without a checkpoint</a></h2>
+                    <p>Three logs, zero errors, and 279,000 entries behind. The faster path was already there, behind an endpoint that returns 404.</p>
                 </article>
                 <article class="post-list-item">
                     <h2><a href="/blog/jemalloc-transparent-huge-pages-rss.html">358 MB resident, 52 MB in use: where the rest went</a></h2>

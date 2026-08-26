@@ -11,14 +11,14 @@
     </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Certstream Quick Start - Run Your Own CT Log Server in Seconds</title>
-    <meta name="description" content="Get started with certstream-server-rust in under a minute. Run your own certificate transparency log streaming server with Docker. Connect via Python, JavaScript, or cURL.">
+    <title>Certstream quick start - run your own CT log server</title>
+    <meta name="description" content="Install certstream-server-rust with Docker, Homebrew, apt, dnf, or cargo, connect over WebSocket or SSE from Python, JavaScript, or cURL, and configure persistent CT log state.">
     <meta name="robots" content="index, follow">
     <link rel="canonical" href="https://certstream.dev/quickstart.html">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://certstream.dev/quickstart.html">
-    <meta property="og:title" content="Certstream Quick Start - Self-Host CT Log Streaming">
-    <meta property="og:description" content="Run your own certstream server with Docker in seconds. Connect via WebSocket or SSE. Code examples for Python, JavaScript, and cURL.">
+    <meta property="og:title" content="certstream-server-rust quick start">
+    <meta property="og:description" content="Install certstream-server-rust, connect over WebSocket or SSE, and configure persistent CT log state. Examples for Python, JavaScript, and cURL.">
     <meta name="theme-color" content="#b7410e">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -51,7 +51,7 @@
         "@context": "https://schema.org",
         "@type": "HowTo",
         "name": "How to set up certstream-server-rust",
-        "description": "Run your own certificate transparency log streaming server with Docker",
+        "description": "Install certstream-server-rust and consume the certificate stream over WebSocket or SSE",
         "step": [
             {
                 "@type": "HowToStep",
@@ -110,8 +110,8 @@
         <div class="wrap">
             <div class="page-header">
                 <span class="eyebrow">Quick start</span>
-                <h1>Your own CT stream, in three steps.</h1>
-                <p>Run a certificate transparency streaming server and start receiving certificates in seconds.</p>
+                <h1>Certstream quick start</h1>
+                <p>Run the server, connect to the stream, and configure persistent state.</p>
             </div>
         </div>
 
@@ -164,10 +164,10 @@ sudo systemctl enable --now certstream-server-rust</pre>
                     </div>
                 </div>
                 <p style="margin-top: 16px; color: var(--ink-3); font-size: 0.9rem;">
-                    The server is now streaming at <code>ws://localhost:8080</code>. Packages and
-                    signed checksums are on the
-                    <a href="https://github.com/reloading01/certstream-server-rust/releases/latest">releases page</a>;
-                    the .deb and .rpm install a systemd unit that keeps log positions across restarts.
+                    The WebSocket stream is now available at <code>ws://localhost:8080/</code>. Packages and signed
+                    checksums are on the
+                    <a href="https://github.com/reloading01/certstream-server-rust/releases/latest">releases page</a>.
+                    The .deb and .rpm packages install a systemd service and keep CT log positions across restarts.
                 </p>
             </div>
         </section>
@@ -228,7 +228,7 @@ ws.onmessage = (event) => {
 ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     // msg.message_type === "dns_entries"
-    // msg.data is a bare string array — no nested object
+    // msg.data is a flat array of strings, not a nested object
     if (msg.message_type === "dns_entries") {
         console.log(msg.data); // ["example.com", "www.example.com"]
     }
@@ -236,8 +236,9 @@ ws.onmessage = (event) => {
                     </div>
                 </div>
                 <p style="margin-top: 16px; color: var(--ink-3); font-size: 0.9rem;">
-                    The <code>/domains-only</code> stream uses <code>message_type: "dns_entries"</code> and its <code>data</code>
-                    is a bare string array. For SSE, use <code>curl -N http://localhost:8080/sse?stream=domains</code>.
+                    The <code>/domains-only</code> stream uses <code>message_type: "dns_entries"</code>, and its
+                    <code>data</code> is a JSON array of domain names rather than a nested certificate object.
+                    For SSE, use <code>curl -N "http://localhost:8080/sse?stream=domains"</code>.
                 </p>
             </div>
         </section>
@@ -246,7 +247,7 @@ ws.onmessage = (event) => {
             <div class="wrap">
                 <div class="section-header">
                     <span class="eyebrow">Step 03</span>
-                    <h2>Production setup</h2>
+                    <h2>Persist state</h2>
                 </div>
                 <div class="code-examples" style="grid-template-columns: 1fr;">
                     <div class="code-example">
@@ -264,6 +265,7 @@ ws.onmessage = (event) => {
                     </div>
                 </div>
                 <p style="margin-top: 16px; color: var(--ink-3); font-size: 0.9rem;">
+                    The state file stores the current CT log positions so the server can resume after a restart.
                     See the <a href="docs.html">API documentation</a> for the full configuration reference.
                 </p>
             </div>

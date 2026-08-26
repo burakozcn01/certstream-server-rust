@@ -227,7 +227,7 @@
 
 <p>Certificate Transparency logs are append-only records of TLS certificates issued by public CAs. I run a server that reads those logs and streams the certificates to connected clients.</p>
 
-<p>The server had been using around 130 MB of resident memory for months. When I finally profiled it over a longer period, RSS kept growing. After two hours it had reached 682 MB and still hadn't levelled off.</p>
+<p>The server had been using around 130 MB of resident memory (RSS) for months. When I finally profiled it over a longer period, RSS kept growing. After two hours it had reached 682 MB and still hadn't levelled off.</p>
 
 <figure class="wide">
 <svg viewBox="0 0 720 300" width="100%" role="img" aria-label="Resident memory over two hours: with jemalloc's defaults it climbs from 180 MB to 682 MB without levelling off, while the live heap stays near 52 MB. With the allocator configured it settles under 80 MB.">
@@ -367,6 +367,25 @@ pub static MALLOC_CONF: &amp;[u8] =
     b"thp:never,narenas:4,background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000\0";</code></pre>
 
 <p><code>#[used]</code> is important here. Nothing in the Rust code references this symbol directly. jemalloc reads it during startup, so LTO can otherwise remove it as unused.</p>
+
+<p>If you enable the crate's <code>unprefixed_malloc_on_supported_platforms</code> feature, that prefix is gone and the symbol has to be <code>malloc_conf</code> instead. Getting the name wrong is not an error. jemalloc doesn't find the symbol and runs with its defaults.</p>
+
+<p>One simple way to check it is to temporarily use an invalid value like <code>narenas:0</code> and watch stderr at startup:</p>
+
+<pre><code>&lt;jemalloc&gt;: <span class="hi">Out-of-range conf value: narenas:0</span></code></pre>
+
+<p>jemalloc writes that line while parsing the configuration, so seeing it means the symbol was found. Nothing on stderr means it wasn't. You can also use <code>tikv-jemalloc-sys</code> to print the full allocator report:</p>
+
+<pre><code>#[cfg(target_os = "linux")]
+fn print_jemalloc_report() {
+    use std::ptr;
+    use tikv_jemalloc_sys::malloc_stats_print;
+
+    // Null callback writes to stderr, null options prints the whole report.
+    unsafe { malloc_stats_print(None, ptr::null_mut(), ptr::null()); }
+}</code></pre>
+
+<p>Then put the real value back.</p>
 
 <p>I keep this configuration Linux-only. macOS doesn't have Linux THP, and the jemalloc build used here doesn't support the same background-thread setup there. Passing those options on macOS results in warnings at startup.</p>
 

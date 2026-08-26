@@ -19,11 +19,11 @@
     <link rel="canonical" href="https://certstream.dev/blog/http2-multiplexing-vs-per-connection-rate-limits.html">
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://certstream.dev/blog/http2-multiplexing-vs-per-connection-rate-limits.html">
-    <meta property="og:title" content="I blamed HTTP/2 multiplexing. Then I counted the connections.">
+    <meta property="og:title" content="HTTP/2 multiplexing vs per-connection rate limits">
     <meta property="og:description" content="Six CT logs were falling behind. HTTP/2 multiplexes every request onto one connection, so I pinned the operator to HTTP/1.1 and got three connections instead of one. Throughput did not move: 49.0 vs 50.0 entries a second. The real limit was 29 entries returned for a 1024-entry request.">
     <meta property="og:site_name" content="certstream-server-rust">
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="I blamed HTTP/2 multiplexing. Then I counted the connections.">
+    <meta name="twitter:title" content="HTTP/2 multiplexing vs per-connection rate limits">
     <meta name="twitter:description" content="Six CT logs were falling behind. HTTP/2 multiplexes every request onto one connection, so I pinned the operator to HTTP/1.1 and got three connections instead of one. Throughput did not move: 49.0 vs 50.0 entries a second. The real limit was 29 entries returned for a 1024-entry request.">
     <meta name="theme-color" content="#b7410e">
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
@@ -58,7 +58,7 @@
 {
     "@context": "https://schema.org",
     "@type": "BlogPosting",
-    "headline": "I blamed HTTP/2 multiplexing. Then I counted the connections.",
+    "headline": "HTTP/2 multiplexing vs per-connection rate limits",
     "alternativeHeadline": "HTTP/2 multiplexing vs per-connection rate limits: measured",
     "description": "Six CT logs were falling behind. HTTP/2 multiplexes every request onto one connection, so I pinned the operator to HTTP/1.1 and got three connections instead of one. Throughput did not move: 49.0 vs 50.0 entries a second. The real limit was 29 entries returned for a 1024-entry request.",
     "datePublished": "2026-08-25",
@@ -130,7 +130,7 @@
         {
             "@type": "ListItem",
             "position": 3,
-            "name": "I blamed HTTP/2 multiplexing. Then I counted the connections.",
+            "name": "HTTP/2 multiplexing vs per-connection rate limits",
             "item": "https://certstream.dev/blog/http2-multiplexing-vs-per-connection-rate-limits.html"
         }
     ]
@@ -146,7 +146,7 @@
             "name": "Does HTTP/2 multiplexing hurt throughput against rate-limited servers?",
             "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "It can, when the server limits per connection rather than per client, because HTTP/2 puts every concurrent request on one connection while HTTP/1.1 uses one per in-flight request. Whether it actually hurts depends on the server. In the case measured here the connection count dropped from three to one and throughput was unchanged at about 50 entries a second, because the constraint was the server's per-request work."
+                "text": "It can, when the server limits per connection rather than per client, because HTTP/2 puts every concurrent request on one connection while HTTP/1.1 uses one per in-flight request. Whether it actually hurts depends on the server. In the case measured here the connection count went from one to three and throughput was unchanged at about 50 entries a second, because the constraint was how much each request returned."
             }
         },
         {
@@ -162,7 +162,7 @@
             "name": "Why does a CT log return fewer entries than requested?",
             "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "RFC 6962 permits returning fewer entries than the requested range, and operators use it to bound response size. The logs measured here returned between 29 and 125 entries for a 1024-entry request, varying between consecutive requests, which suggests a byte budget rather than a fixed entry cap."
+                "text": "RFC 6962 permits returning fewer entries than the requested range, and operators use it to bound response size. The logs measured here returned between 29 and 125 entries for a 1024-entry request, varying between consecutive requests, which suggests a response size limit rather than a fixed entry cap."
             }
         },
         {
@@ -170,7 +170,7 @@
             "name": "How can I force HTTP/1.1 in reqwest?",
             "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "Build a separate client with .http1_only(true) for the hosts that need it rather than disabling HTTP/2 process-wide, so you keep multiplexing everywhere else. Measure the outcome before assuming it helped."
+                "text": "Build a separate client with .http1_only(true) for the hosts that need it rather than disabling HTTP/2 process-wide, so you keep multiplexing everywhere else. Measure entries per second afterwards, not just the connection count."
             }
         }
     ]
@@ -220,49 +220,51 @@
         <article class="post">
             <div class="wrap">
                 <div class="post-header">
-                    <h1>I blamed HTTP/2 multiplexing. Then I counted the connections.</h1>
-                    <p class="standfirst">Every request succeeded. The log stayed 33,000 entries behind. The mechanism I blamed was real, present, and not the problem.</p>
+                    <h1>HTTP/2 multiplexing vs per-connection rate limits</h1>
+                    <p class="standfirst">Every request succeeded and the log stayed 33,000 entries behind. Switching transport gave me three connections instead of one, and changed nothing.</p>
                 </div>
                 <div class="prose">
 
-<p>Certificate Transparency logs are append-only records of every TLS certificate a public CA issues; monitors read them to spot certificates as they appear. Six logs from one operator had been falling behind for weeks in a server of mine that reads all of them. No errors, no rate limit responses, no failed requests. The largest of them sat 33,000 entries behind the head and pulled 3.7 entries a second, which meant it was never going to catch up.</p>
+<p>Six Certificate Transparency logs from one operator had been falling behind for weeks on my server. There were no failed requests or rate limit responses. The worst log was about 33,000 entries behind and was fetching only 3.7 entries per second, so at that rate it wasn't going to catch up.</p>
 
-<p>There was a good explanation available, and I had already implemented it. It turned out to be wrong, and the way it was wrong is more interesting than if it had been right.</p>
+<p>I suspected HTTP/2 multiplexing was the problem. The client uses reqwest, which negotiates HTTP/2 when the server supports it. Multiple concurrent requests to the same host can share a single TCP connection.</p>
 
-<h2>The explanation that fit</h2>
+<p>If the server applies rate limits per connection, that can be a problem. Increasing fetch concurrency doesn't help much if all of those requests still share the same connection and therefore the same limit. With HTTP/1.1, multiple in-flight requests can use multiple connections instead.</p>
 
-<p>The client is <a href="https://github.com/seanmonstar/reqwest">reqwest</a>, which negotiates HTTP/2 when the server offers it. Under HTTP/2 every request to a host is multiplexed onto a single TCP connection. That is the point of the protocol: one connection, many concurrent streams, no head-of-line blocking at the HTTP layer, no handshake per request.</p>
+<p>There was some reason to suspect this. The author of certspotter had run into a <a href="https://github.com/SSLMate/certspotter/issues/126">related issue with the same operator</a> and worked around it by disabling keep-alives.</p>
 
-<p>Now suppose the server on the other end throttles per connection rather than per client. Every one of your concurrent requests is sharing one bucket, and your fetch concurrency setting buys you nothing at all. Worse, moving from HTTP/1.1 to HTTP/2 would have made you slower, because HTTP/1.1 opens a connection per in-flight request and each one carries its own quota.</p>
-
-<p>This is not a hypothetical. The author of certspotter hit something like it with the same operator and dealt with it by <a href="https://github.com/SSLMate/certspotter/issues/126">dropping keep-alives outright</a>. So the server grew an option to pin chosen operators to HTTP/1.1, and that option shipped.</p>
-
-<p>What it did not have was a measurement.</p>
+<p>So I added an option to force HTTP/1.1 for selected operators. Before assuming it actually improved anything, I measured it.</p>
 
 <h2>Counting the connections</h2>
 
-<p>The first thing to check is whether the mechanism is even present. It is a socket count, and you can read it from inside the container:</p>
+<p>First I checked whether switching protocols actually changed the number of connections.</p>
+
+<p>From inside the container:</p>
 
 <pre><code>$ docker exec certstream sh -c 'cat /proc/net/tcp /proc/net/tcp6' \
-    | awk 'NR>1 {print $3}' | cut -d: -f1 | sort | uniq -c | sort -rn</code></pre>
+    | awk 'NR&gt;1 {print $3}' | cut -d: -f1 | sort | uniq -c | sort -rn</code></pre>
 
-<p>Against the operator's addresses, with the default transport:</p>
+<p>With the default HTTP/2 transport:</p>
 
 <pre><code><span class="cm"># HTTP/2</span>
-1 connection -> 54.71.133.191
-1 connection -> 3.137.57.126</code></pre>
+1 connection -&gt; 54.71.133.191
+1 connection -&gt; 3.137.57.126</code></pre>
 
-<p>And with those operators pinned to HTTP/1.1:</p>
+<p>With the affected operators forced to HTTP/1.1:</p>
 
 <pre><code><span class="cm"># HTTP/1.1</span>
-3 connections -> 44.231.171.103
-3 connections -> 3.130.169.13</code></pre>
+3 connections -&gt; 44.231.171.103
+3 connections -&gt; 3.130.169.13</code></pre>
 
-<p>Exactly as described. One connection carrying everything, versus one per in-flight fetch. If the server throttles per connection, this change should have tripled throughput.</p>
+<p>So that part behaved exactly as expected. HTTP/2 used one connection, while HTTP/1.1 used three.</p>
 
-<h2>What it actually did</h2>
+<p>If a per-connection limit was the main constraint, I expected the HTTP/1.1 run to be noticeably faster.</p>
 
-<p>Two runs, 25 minutes each, same machine, same 23 logs, same everything except the transport. Rate is entries actually fetched per second, with index jumps excluded (a 400 response makes the watcher skip to the tree head, and that is not fetched data).</p>
+<h2>Measuring throughput</h2>
+
+<p>I ran both configurations for 25 minutes on the same machine with the same 23 logs. The only change was the HTTP version used for these operators.</p>
+
+<p>The rate here is the number of entries actually fetched per second. Index jumps caused by a 400 response are excluded because those entries were not fetched.</p>
 
 <table>
 <thead><tr><th>Log</th><th class="num">HTTP/2</th><th class="num">HTTP/1.1</th></tr></thead>
@@ -277,43 +279,58 @@
 </tbody>
 </table>
 
-<p>The last two rows sit near zero in both runs because those logs were caught up and idle at the head; they are in the table because leaving them out would flatter whichever column you please.</p>
+<p>There was basically no difference.</p>
 
-<p>Two percent, in favour of the change. For that to mean anything it has to sit outside the run-to-run variance, and it does not: sampling every 30 seconds, the per-interval rate for the busiest log moves by 15 to 20% either side of its mean as the log's own write rate fluctuates. A 2% difference in a 25 minute total is well inside that. Three times the connections, the same data.</p>
+<p>The last two logs were already caught up and mostly idle at the tree head, which is why their rates are close to zero in both runs.</p>
 
-<p>The one row that looks like a win is not one. Wyvern2026h2 started that run 45,000 entries behind instead of 2,400, so it spent the whole window in catch-up while in the other run it was mostly idle at the head. Comparing a log against itself across runs only works when both runs start from a similar position, and that one did not.</p>
+<p>The total improved from 49.0 to 50.0 entries per second, about 2%. That is well inside the normal variation I was seeing. Sampling every 30 seconds, the busiest log varied by roughly 15 to 20% around its mean as the log's own write rate changed.</p>
 
-<h2>Where the throughput was actually going</h2>
+<p>So HTTP/1.1 gave me three connections instead of one, but throughput stayed about the same.</p>
 
-<p>If the transport is not the constraint, ask what the server does with a single request. The watcher asks for 1024 entries at a time:</p>
+<p>Wyvern2026h2 looks much better under HTTP/1.1, but the runs aren't comparable for that log. It started the HTTP/1.1 run about 45,000 entries behind, while in the other run it was only about 2,400 behind. In one test it spent most of the time catching up; in the other it spent much more time idle at the head.</p>
+
+<h2>Checking individual requests</h2>
+
+<p>Since the transport change didn't make a meaningful difference, I looked at what the server was returning for each request.</p>
+
+<p>The watcher asks for up to 1024 entries:</p>
 
 <pre><code>$ curl -s "https://.../ct/v1/get-entries?start=N&amp;end=N+1023"
-
   attempt 1: 1.75s, 763 KB, <span class="hi">125 entries</span>
   attempt 2: 1.68s, 457 KB,  <span class="hi">77 entries</span>
   attempt 3: 1.30s, 167 KB,  <span class="hi">29 entries</span></code></pre>
 
-<p>RFC 6962 lets a log return fewer entries than asked for, and this one returns far fewer: between 29 and 125 against a request for 1024. It is also inconsistent from one request to the next, which rules out a fixed <code>max_get_entries</code> and points at something dynamic, probably a response size budget.</p>
+<p>The request asks for 1024 entries, but the server returned between 29 and 125 in these samples.</p>
 
-<p>So each request costs roughly a second and a half and yields something like 80 entries. The ceiling that produces has nothing to do with how many TCP connections you opened; it is set by how much work the server is willing to do per request, multiplied by how many requests per second your own rate limiter permits. Opening three connections to ask three slow questions instead of one gets you three slow answers.</p>
+<p>RFC 6962 allows a log to return fewer entries than requested, so this is valid behaviour. The number also changed between requests rather than stopping at one fixed entry count. That suggests the limit may be related to response size or some other dynamic server-side constraint rather than a fixed <code>max_get_entries</code> value.</p>
 
-<h2>Why the hypothesis was attractive anyway</h2>
+<p>Each request was taking around 1.3 to 1.8 seconds while returning far fewer entries than requested.</p>
 
-<p>Every part of it was true except the part that mattered. reqwest really does multiplex onto one connection. The socket count really does drop to one. Servers really do sometimes throttle per connection. Another maintainer really did hit a related problem with this operator.</p>
+<p>At that point, opening more TCP connections wasn't enough to materially change the result. The amount of useful data returned per request and the time each request took were much more relevant to the throughput I was seeing.</p>
 
-<p>What was missing was any evidence that <em>this</em> operator was throttling <em>this</em> client per connection right now. The reasoning was sound and the conclusion did not follow, and that combination survives review: everyone checking it checks the mechanism rather than the outcome.</p>
+<h2>Why the HTTP/2 theory looked reasonable</h2>
 
-<p>I have not removed the option. It is opt-in, it costs nothing when unused, and an operator behind a different edge, at a different time, from a different address may well see what the reasoning predicts. What has changed is the documentation, which no longer implies it will help.</p>
+<p>The individual pieces of the original theory were real.</p>
 
-<h2>What I would do differently</h2>
+<p>reqwest was using HTTP/2. The requests were sharing one TCP connection. Switching to HTTP/1.1 increased that to three connections. Per-connection throttling also exists, and another CT client had previously run into a related issue with this operator.</p>
 
-<p>Measure the outcome, not the mechanism. Confirming that the connection count fell to one felt like confirming the theory, and it confirmed nothing except that HTTP/2 works as documented. The number that mattered was entries per second, and it took twenty five minutes per run to get it.</p>
+<p>What I didn't have was evidence that a per-connection limit was actually the bottleneck in this case.</p>
 
-<p>When a client is slow against someone else's server, count what the server gives you per request before you touch the transport. One <code>curl</code> would have shown me a 1024-entry request coming back with 29 entries, and I would have started somewhere else entirely.</p>
+<p>Counting the connections confirmed that the transport change worked, but it didn't show that the change improved throughput. Measuring entries per second did.</p>
 
-<p>And compare runs from the same starting position. The one row in my table that looked like a seven-fold improvement was a log that happened to be further behind, doing catch-up. If I had reported that row on its own it would have been a lie told with real data.</p>
+<p>I've kept the HTTP/1.1 option because it is opt-in and may still be useful with a different operator or server configuration. I changed the documentation so it no longer suggests that enabling it will necessarily improve throughput.</p>
 
-<p class="post-footer">This is <a href="https://github.com/reloading01/certstream-server-rust">certstream-server-rust</a>, a Certificate Transparency log streaming server. The per-operator HTTP/1.1 option was contributed in <a href="https://github.com/reloading01/certstream-server-rust/pull/12">#12</a>; the measurements here are from v1.5.5.</p>
+<h2>What I would check first next time</h2>
+
+<p>If a client is unexpectedly slow against a remote service, I'd start by measuring how much useful data each request returns and how long the request takes.</p>
+
+<p>In this case, one <code>curl</code> request would have shown that a request for 1024 entries could come back with only 29. That would have been useful information before changing the HTTP transport.</p>
+
+<p>I'd also make sure benchmark runs start from comparable states. A log that is 45,000 entries behind behaves differently from one that is already near the tree head. That difference was large enough to make one row look like a major HTTP/1.1 improvement when it wasn't.</p>
+
+<p>The per-operator HTTP/1.1 option is still available, but for these logs, on this test, changing from one connection to three did not materially improve throughput.</p>
+
+<p class="post-footer">The code is in <a href="https://github.com/reloading01/certstream-server-rust">certstream-server-rust</a>. The per-operator HTTP/1.1 option was contributed in <a href="https://github.com/reloading01/certstream-server-rust/pull/12">#12</a>; the measurements here are from v1.5.5.</p>
 
                 </div>
             </div>

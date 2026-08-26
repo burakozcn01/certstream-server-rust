@@ -12,19 +12,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Certstream Server Rust - Real-Time Certificate Transparency Log Streaming</title>
-    <meta name="description" content="Certstream server written in Rust for real-time SSL/TLS certificate streaming. Aggregates certificates from every Chrome- and Apple-trusted CT log via WebSocket and SSE. Drop-in replacement for certstream-server and certstream-server-go. RFC 6962 and static-CT-API in a single binary.">
+    <meta name="description" content="A Certificate Transparency streaming server written in Rust. Reads SSL/TLS certificates from Chrome- and Apple-trusted CT logs and streams them over WebSocket and SSE. Compatible with certstream-server and certstream-server-go clients. RFC 6962 and static-ct-api in a single binary.">
     <meta name="keywords" content="certstream, certstream server, certstream rust, certstream-server-rust, certificate transparency, CT logs, SSL certificates, TLS certificates, real-time streaming, websocket, sse, rust server">
     <meta name="author" content="reloading01">
     <meta name="robots" content="index, follow">
     <link rel="canonical" href="https://certstream.dev/">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://certstream.dev/">
-    <meta property="og:title" content="Certstream Server Rust - Real-Time Certificate Transparency Streaming">
-    <meta property="og:description" content="Certstream server in Rust for real-time certificate streaming. Aggregates SSL/TLS certs from every Chrome- and Apple-trusted CT log. WebSocket and SSE, zero-copy broadcast pipeline.">
+    <meta property="og:title" content="certstream-server-rust: Certificate Transparency streaming">
+    <meta property="og:description" content="A certstream server in Rust. Reads SSL/TLS certificates from Chrome- and Apple-trusted CT logs and streams them over WebSocket and SSE.">
     <meta property="og:site_name" content="certstream-server-rust">
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Certstream Server Rust - Real-Time Certificate Streaming">
-    <meta name="twitter:description" content="Stream SSL/TLS certificates from every Chrome- and Apple-trusted CT log in real-time. WebSocket and SSE. Zero-copy broadcast, flat memory under load.">
+    <meta name="twitter:title" content="certstream-server-rust: Certificate Transparency streaming">
+    <meta name="twitter:description" content="Stream SSL/TLS certificates from Chrome- and Apple-trusted CT logs over WebSocket and SSE. RFC 6962 and static-ct-api, in a single binary.">
     <meta name="theme-color" content="#b7410e">
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -57,7 +57,7 @@
         "@context": "https://schema.org",
         "@type": "SoftwareApplication",
         "name": "certstream-server-rust",
-        "description": "High-performance Certificate Transparency log streaming server written in Rust",
+        "description": "Certificate Transparency log streaming server written in Rust, with WebSocket and SSE endpoints",
         "url": "https://certstream.dev/",
         "applicationCategory": "SecurityApplication",
         "operatingSystem": "Linux, macOS, Windows",
@@ -169,11 +169,11 @@
             <div class="wrap hero-grid">
               <div class="hero-copy">
                 <span class="eyebrow">Certificate transparency · streamed</span>
-                <h1>Real-time CT log streaming, <em>built in Rust.</em></h1>
+                <h1>Certificate Transparency streaming, <em>written in Rust.</em></h1>
                 <p class="hero-desc">
-                    A drop-in certstream server that aggregates newly issued SSL/TLS certificates from every
-                    Chrome- and Apple-trusted Certificate Transparency log and streams them over WebSocket and SSE.
-                    RFC 6962 and static-CT-API, in a single binary.
+                    Reads newly issued SSL/TLS certificates from Chrome- and Apple-trusted Certificate Transparency
+                    logs and streams them over WebSocket or Server-Sent Events. Both RFC 6962 and static-ct-api logs
+                    are supported, in a single binary.
                 </p>
                 <div class="hero-meta">
                     <span>v1.5.6</span><span>·</span><span>MIT</span><span>·</span>
@@ -196,46 +196,45 @@
         <section id="features">
             <div class="wrap">
                 <div class="section-header">
-                    <span class="eyebrow">What you get</span>
-                    <h2>Everything a CT monitor needs, nothing it doesn't.</h2>
-                    <p>Built for security teams, researchers, and developers who need reliable Certificate Transparency monitoring.</p>
+                    <span class="eyebrow">Features</span>
+                    <h2>What the server does.</h2>
                 </div>
                 <div class="features-list">
                     <div class="feature-item">
-                        <h3>Multi-protocol streaming</h3>
-                        <p>WebSocket and Server-Sent Events. WebSocket for real-time clients, SSE for browsers and pipelines — same data, your choice of transport.</p>
+                        <h3>WebSocket and SSE</h3>
+                        <p>Certificate updates can be consumed over WebSocket or Server-Sent Events. Both transports carry the same certificate stream.</p>
                     </div>
                     <div class="feature-item">
-                        <h3>RFC 6962 + static-CT-API</h3>
-                        <p>Both the classic get-entries protocol and the new checkpoint + tile static-ct-api logs are watched side by side in one process.</p>
+                        <h3>RFC 6962 and static-ct-api</h3>
+                        <p>The server watches both classic <code>get-entries</code> logs and newer static-ct-api logs based on checkpoints and tiles. Both types run in the same process.</p>
                     </div>
                     <div class="feature-item">
                         <h3>Cross-log deduplication</h3>
-                        <p>The same certificate shows up across many logs. A SHA-256 filter collapses duplicates so each client sees a clean, single stream.</p>
+                        <p>The same certificate is often submitted to several CT logs. Certificates are deduplicated by SHA-256 before broadcast, so clients receive one update per certificate within the configured deduplication window.</p>
                     </div>
                     <div class="feature-item">
                         <h3>State persistence</h3>
-                        <p>Resume from the last processed position after a restart. No certificate loss during maintenance or upgrades.</p>
+                        <p>Watcher positions can be written to disk and restored after a restart, so each log does not start from scratch after a restart or upgrade.</p>
                     </div>
                     <div class="feature-item">
-                        <h3>Connection limiting</h3>
-                        <p>Per-IP and total connection caps. Production-ready protection against abuse and runaway clients.</p>
+                        <h3>Connection limits</h3>
+                        <p>Optional limits can be applied to the total connection count and per IP address.</p>
                     </div>
                     <div class="feature-item">
                         <h3>Token authentication</h3>
-                        <p>Bearer-token access control with constant-time comparison. Multiple tokens, configurable header name.</p>
+                        <p>Bearer-token authentication can be enabled for client connections. Tokens are compared in constant time, and multiple tokens and a custom header name are supported.</p>
                     </div>
                     <div class="feature-item">
-                        <h3>Hot-reload config</h3>
-                        <p>Configuration changes apply without a restart. A file watcher picks up edits for zero-downtime tuning.</p>
+                        <h3>Configuration reload</h3>
+                        <p>The configuration file can be watched for changes, so supported settings can be updated without restarting the process.</p>
                     </div>
                     <div class="feature-item">
-                        <h3>Circuit breaker &amp; health</h3>
-                        <p>Automatic retry with exponential backoff and per-log circuit breaking. Failing logs are isolated, not allowed to spam.</p>
+                        <h3>Log health</h3>
+                        <p>Each CT log is tracked independently. Repeated failures move a watcher through healthy, degraded, and unhealthy, with retries and exponential backoff behind a per-log circuit breaker.</p>
                     </div>
                     <div class="feature-item">
-                        <h3>Metrics &amp; REST API</h3>
-                        <p>A Prometheus <code>/metrics</code> endpoint plus an optional REST API for server stats, log health, and certificate lookup.</p>
+                        <h3>Metrics and REST API</h3>
+                        <p>Prometheus metrics are exposed at <code>/metrics</code>. An optional REST API serves server statistics, CT log status, and certificate lookup.</p>
                     </div>
                 </div>
             </div>
@@ -244,9 +243,9 @@
         <section id="migrating">
             <div class="wrap">
                 <div class="section-header">
-                    <span class="eyebrow">Coming from the original</span>
-                    <h2>Point your client at a new address.</h2>
-                    <p>The wire format is the one Calidog's certstream-server established and certstream-server-go kept, so existing clients work unchanged.</p>
+                    <span class="eyebrow">Compatibility</span>
+                    <h2>Existing certstream clients.</h2>
+                    <p>The certificate message format follows the one used by Calidog's certstream-server and certstream-server-go, so a client only needs a different WebSocket address.</p>
                 </div>
                 <div class="code-examples">
                     <div class="code-example">
@@ -270,11 +269,11 @@ wscat -c <span class="str">wss://your-host:8080/</span></pre>
                     </div>
                 </div>
                 <p style="margin-top: 24px; color: var(--ink-2); font-size: 0.92rem; max-width: 72ch;">
-                    Message types, field names and the <code>leaf_cert</code> shape are unchanged, so parsers written
-                    against either predecessor keep working. What you gain is coverage and cost: the tile-based
-                    static-CT-API logs that now carry most issuance, cross-log deduplication so the same certificate
-                    does not arrive three times, and the resource profile above. If you only want hostnames, the
-                    <code>/domains-only</code> stream cuts about 4 KB per certificate down to roughly 200 bytes.
+                    Message types, field names and the <code>leaf_cert</code> shape are unchanged, so a parser written
+                    against either predecessor keeps working. This implementation additionally reads static-ct-api
+                    logs and deduplicates certificates seen across several logs. If only domain names are needed, the
+                    <code>/domains-only</code> stream sends roughly 100 to 500 bytes per message instead of the 2 to
+                    5 KB of the default stream.
                 </p>
             </div>
         </section>
@@ -283,32 +282,32 @@ wscat -c <span class="str">wss://your-host:8080/</span></pre>
             <div class="wrap">
                 <div class="section-header">
                     <span class="eyebrow">Performance</span>
-                    <h2>Measured, not marketed.</h2>
-                    <p>All 45 Chrome- and Apple-trusted logs, default configuration, one subscriber on the domains-only stream. Sampled every 30 seconds over two hours.</p>
+                    <h2>Measured throughput.</h2>
+                    <p>A two-hour run against all 45 Chrome- and Apple-trusted logs, with the default configuration and one subscriber on the domains-only stream. Metrics were sampled every 30 seconds.</p>
                 </div>
                 <div class="stat-grid">
                     <div class="stat-cell">
                         <div class="num">420<span class="unit">/s</span></div>
-                        <div class="lbl">Certificates ingested, median · 796/s at p95</div>
+                        <div class="lbl">Certificates ingested, median. 796/s at p95</div>
                     </div>
                     <div class="stat-cell">
                         <div class="num">722<span class="unit">/s</span></div>
-                        <div class="lbl">Domain names · 62 million a day</div>
+                        <div class="lbl">Domain names, 62 million a day</div>
                     </div>
                     <div class="stat-cell">
                         <div class="num">80<span class="unit">MB</span></div>
-                        <div class="lbl">Resident memory, steady state · 50 MB live heap</div>
+                        <div class="lbl">Resident memory, steady state. 50 MB allocated</div>
                     </div>
                     <div class="stat-cell">
                         <div class="num">0.2<span class="unit">core</span></div>
-                        <div class="lbl">CPU, median · 0.18 at p95</div>
+                        <div class="lbl">CPU, median</div>
                     </div>
                 </div>
                 <p style="margin-top: 24px; color: var(--ink-2); font-size: 0.92rem; max-width: 72ch;">
-                    That is 36 million certificates a day on a fifth of one core. Each certificate is serialized once
-                    and broadcast to every subscriber through an <code>Arc&lt;PreSerializedMessage&gt;</code> with
-                    zero-copy text frames; when nobody is connected, serialization is skipped outright. Memory is
-                    flat rather than merely bounded, and the reasoning behind that number is written up in
+                    At the measured median that is about 36 million certificate updates a day. Each certificate is
+                    serialized once and shared with every subscriber through an
+                    <code>Arc&lt;PreSerializedMessage&gt;</code>, and serialization is skipped when no client is
+                    connected. The memory behaviour is described in
                     <a href="/blog/jemalloc-transparent-huge-pages-rss.html">358 MB resident, 52 MB in use</a>.
                 </p>
             </div>
@@ -317,17 +316,17 @@ wscat -c <span class="str">wss://your-host:8080/</span></pre>
         <section id="writing">
             <div class="wrap">
                 <div class="section-header">
-                    <span class="eyebrow">Engineering notes</span>
-                    <h2>What running this against every trusted log taught me.</h2>
+                    <span class="eyebrow">Blog</span>
+                    <h2>Engineering notes.</h2>
                 </div>
                 <!-- blog-teaser:start -->
                 <article class="post-list-item">
-                    <h2><a href="/blog/http2-multiplexing-vs-per-connection-rate-limits.html">I blamed HTTP/2 multiplexing. Then I counted the connections.</a></h2>
-                    <p>Every request succeeded. The log stayed 33,000 entries behind. The mechanism I blamed was real, present, and not the problem.</p>
+                    <h2><a href="/blog/http2-multiplexing-vs-per-connection-rate-limits.html">HTTP/2 multiplexing vs per-connection rate limits</a></h2>
+                    <p>Every request succeeded and the log stayed 33,000 entries behind. Switching transport gave me three connections instead of one, and changed nothing.</p>
                 </article>
                 <article class="post-list-item">
-                    <h2><a href="/blog/ct-logs-tiles-without-checkpoint.html">The CT logs that serve tiles but publish no checkpoint</a></h2>
-                    <p>Three logs, zero errors, 279,000 entries behind. The fast way to read them was sitting right there, behind a missing file.</p>
+                    <h2><a href="/blog/ct-logs-tiles-without-checkpoint.html">Reading Certificate Transparency tiles without a checkpoint</a></h2>
+                    <p>Three logs, zero errors, and 279,000 entries behind. The faster path was already there, behind an endpoint that returns 404.</p>
                 </article>
                 <article class="post-list-item">
                     <h2><a href="/blog/jemalloc-transparent-huge-pages-rss.html">358 MB resident, 52 MB in use: where the rest went</a></h2>
@@ -343,17 +342,17 @@ wscat -c <span class="str">wss://your-host:8080/</span></pre>
         <section id="support">
             <div class="wrap">
                 <div class="section-header">
-                    <span class="eyebrow">Support the project</span>
-                    <h2>Built in spare time, kept free.</h2>
+                    <span class="eyebrow">Support</span>
+                    <h2>Supporting the project.</h2>
                 </div>
                 <div class="center-block">
                     <p>
-                        I build this in my free time. Just using it, starring the repo, or sharing it with someone who
-                        needs it already means a lot — that's the kind of thing that keeps me going.
+                        certstream-server-rust is developed in my spare time and released under the MIT license. If you
+                        find it useful, starring the repository, reporting issues, or sharing it with someone who needs
+                        it is appreciated.
                     </p>
                     <p>
-                        If you'd like to go a step further, you can sponsor me on GitHub. No pressure though — every form
-                        of support is appreciated.
+                        GitHub Sponsors is also available for anyone who wants to support development.
                     </p>
                     <div style="margin-top: 24px;">
                         <a href="https://github.com/sponsors/reloading01" class="btn btn-primary" target="_blank" rel="noopener">Sponsor on GitHub</a>
