@@ -134,7 +134,7 @@
                     <h2>What is Certstream?</h2>
                     <p>Certificate Transparency log aggregation over WebSocket and SSE.</p>
                 </div>
-                <div class="features-list" style="grid-template-columns: repeat(2, 1fr);">
+                <div class="features-list cols-2">
                     <div class="feature-item">
                         <h3>What it does</h3>
                         <p>Certstream reads certificates from Certificate Transparency logs and streams them to connected clients. This Rust implementation speaks the same message format as certstream-server (Elixir) and certstream-server-go, so existing clients work against it unchanged.</p>
@@ -258,7 +258,7 @@
                     <h2>Stream types</h2>
                     <p>Three output formats, at three levels of detail.</p>
                 </div>
-                <div class="features-list" style="grid-template-columns: repeat(3, 1fr);">
+                <div class="features-list">
                     <div class="feature-item">
                         <h3>Lite (default)</h3>
                         <p>Certificate metadata, domains, issuer information, and timestamps. Does not include the DER-encoded certificate or the chain.</p>
@@ -717,7 +717,7 @@ docker compose up -d</pre>
                     <h2>CT logs monitored</h2>
                     <p>The server monitors Chrome- and Apple-trusted Certificate Transparency logs and deduplicates certificates that appear in more than one log.</p>
                 </div>
-                <div class="features-list" style="grid-template-columns: repeat(3, 1fr);">
+                <div class="features-list">
                     <div class="feature-item"><h3>Google</h3><p>Argon, Xenon</p></div>
                     <div class="feature-item"><h3>Cloudflare</h3><p>Nimbus, Raio (static CT)</p></div>
                     <div class="feature-item"><h3>DigiCert</h3><p>Wyvern, Sphinx</p></div>

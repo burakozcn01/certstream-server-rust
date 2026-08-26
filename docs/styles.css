@@ -339,7 +339,9 @@ section > .wrap > p strong { color: var(--ink); font-weight: 600; }
 
 /* ---------- feature cards ---------- */
 .features-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
-.feature-item { background: var(--surface); padding: 28px 26px; transition: background .18s; }
+.features-list.cols-2 { grid-template-columns: repeat(2, 1fr); }
+.feature-item { background: var(--surface); padding: 28px 26px; transition: background .18s; min-width: 0; }
+.feature-item code { overflow-wrap: anywhere; }
 .feature-item:hover { background: var(--surface-hover); }
 .feature-item h3 {
     font-family: 'IBM Plex Sans', sans-serif;
@@ -365,7 +367,7 @@ section > .wrap > p strong { color: var(--ink); font-weight: 600; }
 
 /* ---------- stat cards (own performance) ---------- */
 .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
-.stat-cell { background: var(--surface); padding: 30px 24px; }
+.stat-cell { background: var(--surface); padding: 30px 24px; min-width: 0; }
 .stat-cell .num {
     font-family: 'Newsreader', Georgia, serif;
     font-size: 2.4rem;
@@ -551,10 +553,12 @@ footer .colophon { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; 
 
 /* ---------- responsive ---------- */
 @media (max-width: 920px) {
-    .features-list { grid-template-columns: repeat(2, 1fr); }
+    .features-list, .features-list.cols-2 { grid-template-columns: repeat(2, 1fr); }
     .stat-grid { grid-template-columns: repeat(2, 1fr); }
     .code-examples { grid-template-columns: 1fr; }
-    .nav-links, .gh-link { display: none; }
+    /* Matches the specificity of `nav .nav-links` above, which a bare
+       `.nav-links` loses to no matter which media query it sits in. */
+    nav .nav-links, .gh-link { display: none; }
     .mobile-menu-btn { display: flex; }
     section { padding: 44px 0; }
     .hero { padding: 64px 0 56px; }
@@ -562,7 +566,10 @@ footer .colophon { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; 
 
 @media (max-width: 600px) {
     .wrap { padding: 0 20px; }
-    .features-list { grid-template-columns: 1fr; }
+    /* Identifiers like CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS have no break
+       opportunity, so on a narrow screen one of them widens the whole page. */
+    :not(pre) > code { overflow-wrap: break-word; }
+    .features-list, .features-list.cols-2 { grid-template-columns: 1fr; }
     .stat-grid { grid-template-columns: 1fr 1fr; }
     .section-header h2 { font-size: 1.7rem; }
     .install-box { flex-direction: column; align-items: stretch; gap: 12px; }
@@ -756,6 +763,14 @@ footer .colophon { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; 
 @media (max-width: 640px) {
     .prose p { font-size: 1rem; }
     .post-list-item h2 { font-size: 1.3rem; }
+    /* A cell like /tile/data/x010/x076/918 has no break opportunity, so the
+       table cannot honour width:100%. Scroll the table, not the page. */
+    .prose table {
+        display: block;
+        width: max-content;
+        max-width: 100%;
+        overflow-x: auto;
+    }
 }
 
 
