@@ -22,11 +22,11 @@
             <description>Three CT logs were falling 279,000 entries behind with zero errors. They serve static-ct-api tiles but return 404 for /checkpoint. Reading them with the tree size from get-sth, and the three failures that only appeared against live logs.</description>
         </item>
         <item>
-            <title>358 MB resident, 52 MB in use: where the rest went</title>
+            <title>358 MB resident, 52 MB live heap: where the rest went</title>
             <link>https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html</link>
             <guid isPermaLink="true">https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html</guid>
             <pubDate>Tue, 25 Aug 2026 09:00:00 +0000</pubDate>
-            <description>A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. Transparent huge pages were holding 206 MB jemalloc could not return, and the fix was five settings the allocator had been running without.</description>
+            <description>A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. 206 MB of the resident set was in transparent huge pages, and the fix was five settings the allocator had been running without.</description>
         </item>
     </channel>
 </rss>

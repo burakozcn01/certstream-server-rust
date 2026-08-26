@@ -12,19 +12,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Why jemalloc RSS is 4x the live heap: transparent huge pages</title>
-    <meta name="description" content="A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. Transparent huge pages were holding 206 MB jemalloc could not return. How to diagnose it with jemalloc stats and smaps, and the thp:never fix.">
+    <meta name="description" content="A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. 206 MB of the resident set was in transparent huge pages. How to diagnose it with jemalloc stats and smaps, and the thp:never fix.">
     <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large">
     <meta name="author" content="reloading01">
     <meta name="keywords" content="jemalloc, transparent huge pages, THP, RSS memory, Rust memory usage, memory leak debugging, AnonHugePages, narenas, dirty_decay_ms, container memory">
     <link rel="canonical" href="https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html">
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html">
-    <meta property="og:title" content="358 MB resident, 52 MB in use: where the rest went">
-    <meta property="og:description" content="A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. Transparent huge pages were holding 206 MB jemalloc could not return. How to diagnose it with jemalloc stats and smaps, and the thp:never fix.">
+    <meta property="og:title" content="358 MB resident, 52 MB live heap: where the rest went">
+    <meta property="og:description" content="A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. 206 MB of the resident set was in transparent huge pages. How to diagnose it with jemalloc stats and smaps, and the thp:never fix.">
     <meta property="og:site_name" content="certstream-server-rust">
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="358 MB resident, 52 MB in use: where the rest went">
-    <meta name="twitter:description" content="A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. Transparent huge pages were holding 206 MB jemalloc could not return. How to diagnose it with jemalloc stats and smaps, and the thp:never fix.">
+    <meta name="twitter:title" content="358 MB resident, 52 MB live heap: where the rest went">
+    <meta name="twitter:description" content="A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. 206 MB of the resident set was in transparent huge pages. How to diagnose it with jemalloc stats and smaps, and the thp:never fix.">
     <meta name="theme-color" content="#b7410e">
     <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <link rel="alternate" type="application/rss+xml" title="certstream-server-rust blog" href="/feed.xml">
@@ -58,9 +58,9 @@
 {
     "@context": "https://schema.org",
     "@type": "BlogPosting",
-    "headline": "358 MB resident, 52 MB in use: where the rest went",
+    "headline": "358 MB resident, 52 MB live heap: where the rest went",
     "alternativeHeadline": "Why jemalloc RSS is 4x the live heap: transparent huge pages",
-    "description": "A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. Transparent huge pages were holding 206 MB jemalloc could not return. How to diagnose it with jemalloc stats and smaps, and the thp:never fix.",
+    "description": "A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. 206 MB of the resident set was in transparent huge pages. How to diagnose it with jemalloc stats and smaps, and the thp:never fix.",
     "datePublished": "2026-08-25",
     "dateModified": "2026-08-25",
     "inLanguage": "en",
@@ -130,7 +130,7 @@
         {
             "@type": "ListItem",
             "position": 3,
-            "name": "358 MB resident, 52 MB in use: where the rest went",
+            "name": "358 MB resident, 52 MB live heap: where the rest went",
             "item": "https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html"
         }
     ]
@@ -146,7 +146,7 @@
             "name": "Why is RSS so much higher than the heap in my Rust program?",
             "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "RSS is what the kernel charges the process for; the live heap is what the allocator has handed out. Pages freed inside the allocator still count toward RSS until returned to the kernel, and transparent huge pages can prevent that return entirely. Check AnonHugePages in /proc/pid/smaps_rollup before assuming a leak."
+                "text": "RSS is what the kernel charges the process for; the live heap is what the allocator has handed out. Pages freed inside the allocator still count toward RSS until returned to the kernel, and transparent huge pages can hold far more of it resident than the live objects need. Check AnonHugePages in /proc/pid/smaps_rollup before assuming a leak."
             }
         },
         {
@@ -154,7 +154,7 @@
             "name": "How do I stop jemalloc from using transparent huge pages?",
             "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "Set thp:never in jemalloc's runtime configuration, which makes it mark its own mappings MADV_NOHUGEPAGE without changing the host setting for other processes. In Rust with tikv-jemallocator, export a _rjem_malloc_conf symbol or set the _RJEM_MALLOC_CONF environment variable."
+                "text": "Set thp:never in jemalloc's runtime configuration. jemalloc then marks the mappings it makes for user allocations MADV_NOHUGEPAGE, so the host-wide THP policy stays untouched. In Rust with tikv-jemallocator, export a _rjem_malloc_conf symbol or set the _RJEM_MALLOC_CONF environment variable."
             }
         },
         {
@@ -162,7 +162,7 @@
             "name": "Does THP in always mode increase memory usage?",
             "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "It can, for allocators that free at 4 KiB granularity: a 2 MiB huge page cannot be returned while any object in it is live. In the case measured here it accounted for 206 MB of a 358 MB resident set. Workloads with large long-lived allocations often benefit from THP instead."
+                "text": "It can, for allocators that free at 4 KiB granularity: a partly used huge page keeps far more memory resident than the live objects in it until the kernel splits or reclaims it. On the machine measured here, 206 MB of a 358 MB resident set was in transparent huge pages against a 52 MB live heap. Workloads with large long-lived allocations often benefit from THP instead."
             }
         },
         {
@@ -170,7 +170,7 @@
             "name": "How many arenas should jemalloc use in a container?",
             "acceptedAnswer": {
                 "@type": "Answer",
-                "text": "jemalloc defaults to four times the CPU count read from the host rather than the cgroup quota, so a container gets far more arenas than it has threads. Matching narenas to the runtime's worker thread count reduces fragmentation and arena metadata; here it halved metadata from 11.8 MB to 4.8 MB."
+                "text": "jemalloc's default arena count is four times the CPU count. In the container measured here that count came from the host's 18 cores, so the process got 72 arenas for a four-thread runtime. Matching narenas to the runtime's worker thread count reduces fragmentation and arena metadata; here it halved metadata from 11.8 MB to 4.8 MB."
             }
         }
     ]
@@ -220,7 +220,7 @@
         <article class="post">
             <div class="wrap">
                 <div class="post-header">
-                    <h1>358 MB resident, 52 MB in use: where the rest went</h1>
+                    <h1>358 MB resident, 52 MB live heap: where the rest went</h1>
                     <p class="standfirst">A service that looked like it was leaking. It wasn't, and the fix was five settings the allocator had been running without.</p>
                 </div>
                 <div class="prose">
@@ -230,7 +230,7 @@
 <p>The server had been using around 130 MB of resident memory (RSS) for months. When I finally profiled it over a longer period, RSS kept growing. After two hours it had reached 682 MB and still hadn't levelled off.</p>
 
 <figure class="wide">
-<svg viewBox="0 0 720 300" width="100%" role="img" aria-label="Resident memory over two hours: with jemalloc's defaults it climbs from 180 MB to 682 MB without levelling off, while the live heap stays near 52 MB. With the allocator configured it settles under 80 MB.">
+<svg viewBox="0 0 720 300" width="100%" role="img" aria-label="Resident memory over time: with jemalloc's defaults it climbs from 180 MB to 682 MB over two hours without levelling off. On a shorter run with the allocator configured it stays between 60 and 85 MB, with the live heap a little below it.">
   <title>Resident memory over time, default allocator settings versus configured</title>
   <line x1="52" y1="266.0" x2="704" y2="266.0" stroke="var(--line)" stroke-width="1"/><text x="44" y="270.0" text-anchor="end" font-size="11" fill="var(--ink-3)">0</text><line x1="52" y1="195.1" x2="704" y2="195.1" stroke="var(--line)" stroke-width="1"/><text x="44" y="199.1" text-anchor="end" font-size="11" fill="var(--ink-3)">200</text><line x1="52" y1="124.3" x2="704" y2="124.3" stroke="var(--line)" stroke-width="1"/><text x="44" y="128.3" text-anchor="end" font-size="11" fill="var(--ink-3)">400</text><line x1="52" y1="53.4" x2="704" y2="53.4" stroke="var(--line)" stroke-width="1"/><text x="44" y="57.4" text-anchor="end" font-size="11" fill="var(--ink-3)">600</text><text x="52.0" y="288" text-anchor="middle" font-size="11" fill="var(--ink-3)">0</text><text x="229.8" y="288" text-anchor="middle" font-size="11" fill="var(--ink-3)">30</text><text x="407.6" y="288" text-anchor="middle" font-size="11" fill="var(--ink-3)">60</text><text x="585.5" y="288" text-anchor="middle" font-size="11" fill="var(--ink-3)">90</text>
   <text x="44" y="14" text-anchor="end" font-size="11" fill="var(--ink-3)">MB</text>
@@ -242,7 +242,7 @@
   <text x="206.1" y="212.9" font-size="12" fill="var(--ink)">RSS, configured</text>
   <text x="206.1" y="253.6" font-size="12" fill="var(--ink-3)">live heap</text>
 </svg>
-<figcaption>Resident memory sampled every 30 seconds. The upper line is the two hour run on stock allocator settings; it is still climbing at 108 minutes. The lower pair is the same workload with the allocator configured, resident and live heap tracking each other under 80 MB.</figcaption>
+<figcaption>Resident memory sampled every 30 seconds. The upper line is the two hour run on stock allocator settings; it is still climbing at 108 minutes. The lower pair is a shorter run of the same workload with the allocator configured: resident stays between 60 and 85 MB and the live heap tracks it from just below, rising over the first twenty minutes as the dedup cache fills and then flattening.</figcaption>
 </figure>
 
 <p>The workload shouldn't retain anywhere near that much memory. There is a deduplication cache with a fifteen minute window, a 1,000-entry cache for the REST endpoint, and a broadcast channel holding 1,000 messages. Even with generous estimates, the data the application actually needs to keep around should fit in roughly 60 MB.</p>
@@ -263,7 +263,7 @@
 
 <pre><code>certstream_jemalloc_allocated_bytes   <span class="cm">// live heap</span>
 certstream_jemalloc_active_bytes
-certstream_jemalloc_resident_bytes    <span class="cm">// physical pages jemalloc accounts for</span>
+certstream_jemalloc_resident_bytes    <span class="cm">// resident pages tracked by jemalloc</span>
 certstream_jemalloc_mapped_bytes
 certstream_jemalloc_retained_bytes
 certstream_jemalloc_metadata_bytes</code></pre>
@@ -276,16 +276,16 @@ certstream_jemalloc_metadata_bytes</code></pre>
 <thead><tr><th>Measure</th><th class="num">Memory</th></tr></thead>
 <tbody>
 <tr><td>RSS reported by the kernel</td><td class="num">358 MB</td></tr>
-<tr><td>jemalloc <code>resident</code></td><td class="num">95 MB</td></tr>
-<tr><td>jemalloc <code>allocated</code></td><td class="num">52 MB</td></tr>
+<tr><td>jemalloc <code>stats.resident</code></td><td class="num">95 MB</td></tr>
+<tr><td>jemalloc <code>stats.allocated</code></td><td class="num">52 MB</td></tr>
 </tbody>
 </table>
 
-<p>The useful number here was <code>allocated</code>: 52 MB.</p>
+<p>The useful number here was <code>stats.allocated</code>, the bytes the application currently has outstanding: 52 MB.</p>
 
 <p>That was close to what I expected from the application's caches and other live data. The application wasn't holding hundreds of megabytes of objects.</p>
 
-<p>There was still another problem, though. jemalloc accounted for 95 MB of resident memory while the kernel reported 358 MB for the process.</p>
+<p>There was still a gap, though. jemalloc reported <code>stats.resident</code> of 95 MB while the kernel reported 358 MB for the process. Those are not the same measurement. jemalloc documents <code>stats.resident</code> as an upper bound on the physically resident pages in its own mappings, counting active allocations, allocator metadata and unused dirty pages. Even as an upper bound, it was 263 MB short of what the kernel was charging the process.</p>
 
 <h2>Finding the missing memory</h2>
 
@@ -301,11 +301,11 @@ AnonHugePages:    <span class="hi">206848 kB</span></code></pre>
 <pre><code>$ cat /sys/kernel/mm/transparent_hugepage/enabled
 [always] madvise never</code></pre>
 
-<p>With <code>always</code>, the kernel can promote anonymous memory into 2 MiB huge pages.</p>
+<p>With <code>always</code>, the kernel can back anonymous memory with huge pages instead of ordinary 4 KiB ones. The size depends on the architecture and the kernel build; here they were the 2 MiB pages that <code>AnonHugePages</code> counts.</p>
 
 <p>That doesn't work particularly well with this workload. The server processes around 420 certificates per second across roughly 100 tasks. Each certificate involves a short-lived buffer of several kilobytes that gets parsed and then dropped. There is a lot of allocation and deallocation, but relatively little memory that needs to remain live.</p>
 
-<p>jemalloc normally manages memory at much smaller page granularity. Once allocations end up inside a 2 MiB huge page, a small amount of live data can keep the entire huge page resident. A huge page containing only one live 4 KiB object still cannot simply be returned as 4 KiB of used memory.</p>
+<p>jemalloc normally manages memory at much smaller page granularity. Once allocations are backed by huge pages, reclaim is no longer equivalent to reclaiming ordinary 4 KiB pages independently, so a partly used huge page can keep substantially more memory resident than the live data in it. The kernel can split a huge page, and recent kernels can also break up underused ones under memory pressure, but neither happens on the timescale at which jemalloc frees a parsed certificate buffer.</p>
 
 <p>With enough allocation churn, that leaves a lot of mostly empty huge pages resident.</p>
 
@@ -350,13 +350,13 @@ AnonHugePages:         0 kB</code></pre>
 
 <pre><code>thp:never,narenas:4,background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000</code></pre>
 
-<p><code>thp:never</code> makes jemalloc mark its mappings with <code>MADV_NOHUGEPAGE</code>. It only affects jemalloc's mappings, so there is no need to change the host-wide THP setting.</p>
+<p><code>thp:never</code> makes jemalloc call <code>MADV_NOHUGEPAGE</code> on the mappings it creates for user allocations, so the host-wide THP policy can stay as it is. It is scoped to that path: allocator metadata has its own <code>metadata_thp</code> option, and memory obtained through custom extent hooks is outside it.</p>
 
 <p><code>narenas:4</code> matches the four Tokio worker threads instead of deriving the arena count from the host's 18 cores.</p>
 
 <p><code>background_thread:true</code> lets jemalloc purge pages from arenas even when those arenas are no longer receiving allocations.</p>
 
-<p>I also set both dirty and muzzy decay to five seconds.</p>
+<p>I also set dirty and muzzy decay to five seconds. Worth being precise about what that does: in jemalloc 5.3 <code>dirty_decay_ms</code> defaults to 10,000 and <code>muzzy_decay_ms</code> to 0, so five seconds tightens dirty decay slightly and actually makes muzzy purging lazier than the default. It is not what brought RSS down.</p>
 
 <p>For <code>tikv-jemallocator</code>, I put the default configuration in the binary using jemalloc's exported configuration symbol. The crate builds jemalloc with the <code>_rjem_</code> prefix, so the symbol looks like this:</p>
 
@@ -398,8 +398,8 @@ fn print_jemalloc_report() {
 <table>
 <thead><tr><th>Measure</th><th class="num">Before</th><th class="num">After</th></tr></thead>
 <tbody>
-<tr><td>RSS, THP <code>always</code> host</td><td class="num">358 MB</td><td class="num">83 MB</td></tr>
-<tr><td>RSS, THP <code>madvise</code> host</td><td class="num">88 MB</td><td class="num">77 MB</td></tr>
+<tr><td>RSS, THP <code>always</code> host</td><td class="num">358 MB</td><td class="num">85 MB</td></tr>
+<tr><td>RSS, THP <code>madvise</code> host</td><td class="num">88 MB</td><td class="num">76 MB</td></tr>
 <tr><td><code>AnonHugePages</code></td><td class="num">206 MB</td><td class="num">6 MB</td></tr>
 <tr><td>jemalloc retained</td><td class="num">116 MB</td><td class="num">34 MB</td></tr>
 <tr><td>Arena metadata</td><td class="num">11.8 MB</td><td class="num">4.8 MB</td></tr>
@@ -409,9 +409,9 @@ fn print_jemalloc_report() {
 
 <p>The important part for me is that the live heap barely changed. It went from 52 MB to 49 MB.</p>
 
-<p>The large change was in RSS. On the THP <code>always</code> host it dropped from 358 MB to 83 MB. <code>AnonHugePages</code> went from 206 MB to 6 MB.</p>
+<p>The large change was in RSS. On the THP <code>always</code> host it dropped from 358 MB to 85 MB. <code>AnonHugePages</code> went from 206 MB to 6 MB.</p>
 
-<p>The <code>madvise</code> host also improved, but only from 88 MB to 77 MB. That smaller difference is consistent with the arena and decay changes rather than THP.</p>
+<p>The <code>madvise</code> host also improved, but only from 88 MB to 76 MB. That smaller difference is what the non-THP settings are worth here, mostly the reduced arena count and background purging.</p>
 
 <h2>What I took away from this</h2>
 
@@ -423,7 +423,7 @@ fn print_jemalloc_report() {
 
 <pre><code>/sys/kernel/mm/transparent_hugepage/enabled</code></pre>
 
-<p>when memory behaviour differs between machines. In this case the production host used <code>madvise</code>, while Docker Desktop's VM used <code>always</code>. That one difference accounted for most of the discrepancy.</p>
+<p>when memory behaviour differs between machines. In this case the production host used <code>madvise</code>, while the Docker Desktop VM on my laptop used <code>always</code>. That one difference accounted for most of the discrepancy.</p>
 
 <p>The other lesson for this service was not to treat jemalloc as a drop-in replacement that never needs configuration. I had switched the global allocator two releases earlier and left all of its defaults untouched. That gave a four-thread runtime 72 arenas and let the allocator's behaviour depend on the host it happened to run on.</p>
 

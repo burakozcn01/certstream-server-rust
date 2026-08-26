@@ -83,10 +83,10 @@
         },
         {
             "@type": "BlogPosting",
-            "headline": "358 MB resident, 52 MB in use: where the rest went",
+            "headline": "358 MB resident, 52 MB live heap: where the rest went",
             "datePublished": "2026-08-25",
             "url": "https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html",
-            "description": "A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. Transparent huge pages were holding 206 MB jemalloc could not return, and the fix was five settings the allocator had been running without."
+            "description": "A Rust service looked like it was leaking: 358 MB resident against a 52 MB live heap. 206 MB of the resident set was in transparent huge pages, and the fix was five settings the allocator had been running without."
         }
     ]
 }
@@ -150,7 +150,7 @@
                     <p>Three logs, zero errors, and 279,000 entries behind. The faster path was already there, behind an endpoint that returns 404.</p>
                 </article>
                 <article class="post-list-item">
-                    <h2><a href="/blog/jemalloc-transparent-huge-pages-rss.html">358 MB resident, 52 MB in use: where the rest went</a></h2>
+                    <h2><a href="/blog/jemalloc-transparent-huge-pages-rss.html">358 MB resident, 52 MB live heap: where the rest went</a></h2>
                     <p>A service that looked like it was leaking. It wasn&#x27;t, and the fix was five settings the allocator had been running without.</p>
                 </article>
             </div>

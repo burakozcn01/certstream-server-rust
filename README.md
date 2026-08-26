@@ -287,7 +287,7 @@ docker compose up -d
 
 Steady state is roughly 85 MB resident at 420 certs/s across all 45 trusted logs, against a live heap of ~50 MB. The rest is allocator working set.
 
-The binary ships jemalloc defaults tuned for this workload: `thp:never,narenas:4,background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000`. `thp:never` matters most. On a host running transparent huge pages in `always` mode the kernel promotes jemalloc's 4 KiB pages into 2 MiB ones, and a partly-free huge page cannot be returned, so RSS parks at several times the live heap (measured: 358 MB resident, 206 MB of it `AnonHugePages`). Check your host with:
+The binary ships jemalloc defaults tuned for this workload: `thp:never,narenas:4,background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000`. `thp:never` matters most. On a host running transparent huge pages in `always` mode the kernel backs jemalloc's mappings with 2 MiB huge pages, and a partly free huge page keeps far more memory resident than the live data in it, so RSS parks at several times the live heap (measured: 358 MB resident, 206 MB of it `AnonHugePages`). Check your host with:
 
 ```bash
 cat /sys/kernel/mm/transparent_hugepage/enabled
@@ -300,7 +300,7 @@ docker run -e _RJEM_MALLOC_CONF=dirty_decay_ms:30000,muzzy_decay_ms:30000 \
   ghcr.io/reloading01/certstream-server-rust:latest
 ```
 
-`/metrics` exposes the allocator's own view. `certstream_jemalloc_allocated_bytes` is the live heap and `certstream_jemalloc_resident_bytes` is what the process pays for: a gap between them is allocator behaviour, growth in `allocated` is the application holding data.
+`/metrics` exposes the allocator's own view. `certstream_jemalloc_allocated_bytes` is the live heap and `certstream_jemalloc_resident_bytes` is jemalloc's own estimate of the resident pages behind it, which is not the same thing as the kernel's RSS: a gap between the two is allocator behaviour, growth in `allocated` is the application holding data.
 
 Dedup is the largest single consumer that scales with traffic. Its steady-state size is ingest rate × TTL, bounded by `dedup.capacity`: at 420 certs/s a 15-minute window wants ~354K entries, so the default 200K cap binds and the effective window narrows to keep it. `certstream_dedup_effective_ttl_seconds` reports the window actually in force. Raise `dedup.capacity` to buy deeper cross-log dedup at roughly 100 bytes per entry.
 
