@@ -1,87 +1,84 @@
 # certstream-server-rust
 
-A high-performance **certstream server** written in Rust. Monitors Certificate Transparency logs and streams newly issued SSL/TLS certificates in real-time via WebSocket and SSE. 
+A Certstream server written in Rust. It monitors Certificate Transparency (CT) logs and streams newly issued SSL/TLS certificates over WebSocket and Server-Sent Events (SSE).
 
 [![GHCR](https://img.shields.io/badge/ghcr.io-reloading01%2Fcertstream--server--rust-blue?logo=github)](https://github.com/reloading01/certstream-server-rust/pkgs/container/certstream-server-rust)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Sponsor](https://img.shields.io/badge/sponsor-%E2%9D%A4-ff69b4?logo=githubsponsors)](https://github.com/sponsors/reloading01)
 
-## What is Certstream?
+## Overview
 
-Certstream aggregates certificates from Certificate Transparency (CT) logs and streams them in real-time. It provides a firehose of newly issued SSL/TLS certificates that you can filter and process for your own purposes.
+Certstream aggregates certificates from Certificate Transparency logs and streams them in real time. This implementation is compatible with existing Certstream clients and supports both RFC 6962 and static-CT logs.
 
-This Rust implementation is a drop-in replacement that maintains full compatibility with existing certstream clients.
+Key features:
 
-### Why Rust?
-
-- Flat resident memory that tracks live usage: ~85 MB steady-state at 420 certs/s, with the allocator tuned so catch-up bursts don't park RSS at the high-water mark (see [Memory](#memory))
-- Keeps pace with live CT issuance: pipelined catch-up fetches with an unchanged per-operator request rate
-- Single shared issuer cache (pre-parsed certs) across all static-CT watchers — no per-log cache duplication, no re-parsing shared intermediates
-- Pre-serialized broadcast via `Arc<PreSerializedMessage>` with zero-copy `Utf8Bytes` Text frames — no per-subscriber JSON re-encoding, no per-subscriber UTF-8 validation
-- Idle-server pre-serialize guard — JSON serialization skipped entirely when `receiver_count() == 0`
-- SIMD-accelerated JSON via `simd-json` (enabled by default)
-- Single binary, no runtime dependencies
-
-## Features
-
-- WebSocket and Server-Sent Events (SSE)
-- Pre-serialized messages for efficient broadcasting
-- Every Chrome- and Apple-trusted Certificate Transparency log monitored across both Google and Apple log lists (Google, Cloudflare, DigiCert, Sectigo, Let's Encrypt, Geomys, IPng Networks, TrustAsia, …)
-- **Static-CT-API support** — checkpoint + tile protocol used by Let's Encrypt's Sycamore/Willow, Cloudflare Raio, IPng Halloumi/Gouda, Geomys Tuscolo, TrustAsia Luoshu and other tiled logs
-- **Tiled-log discovery** — `operators[].tiled_logs[]` auto-merged from Apple + Google lists, deduped by `log_id`
-- Cross-log dedup with an enforced capacity and TTL (defaults 200K entries / 15-minute window)
-- Runtime kill switches per protocol family: `CERTSTREAM_RFC6962_ENABLED`, `CERTSTREAM_STATIC_CT_ENABLED`
-- State persistence - resume from last position after restart
-- Connection limiting - protect against abuse with per-IP and total limits
-- Token authentication - Bearer token based API access control
-- Hot reload - config changes apply without restart
-- Rate limiting - token bucket + sliding window algorithm
-- Circuit breaker - automatic isolation of failing CT logs with exponential backoff
-- Prometheus metrics endpoint (/metrics)
-- Health check endpoint (/health)
-- REST API for server stats and CT log health
-- Certificate lookup by SHA256, SHA1, or fingerprint
+- WebSocket and SSE streaming
+- Full, lite, and domains-only streams
+- Chrome- and Apple-trusted CT log discovery
+- Static-CT checkpoint and tile support
+- Cross-log certificate deduplication
+- Persistent CT log positions across restarts
+- Per-IP connection and request limiting
+- Bearer-token authentication
+- Hot-reloadable configuration
+- Circuit breakers and retry handling for CT logs
+- Prometheus metrics and health endpoints
+- Optional REST API with certificate lookup
+- Pre-serialized broadcast payloads and SIMD JSON
+- Single binary with no runtime dependencies
 
 ## Documentation
 
-Visit **[certstream.dev](https://certstream.dev/)** for:
-- Detailed API documentation
-- Client examples and integration guides
-- Self-hosting guide
+Full API documentation, client examples, integration guides, and self-hosting notes are available at [certstream.dev](https://certstream.dev/).
 
-## Install
+## Installation
 
-Prebuilt binaries are static musl builds on Linux, so they run regardless of glibc version. Every archive ships with a `.sha256` next to it.
+Prebuilt Linux binaries use static musl builds and do not depend on the host glibc version. Release archives include SHA-256 checksums.
 
-**Script** (Linux and macOS, x86_64 and arm64):
+### Install script
+
+Linux and macOS, x86_64 and arm64:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/reloading01/certstream-server-rust/main/install.sh | sh
 ```
 
-It verifies the checksum and refuses to install without one. `PREFIX=$HOME/.local` avoids needing root; `VERSION=v1.5.6` pins a release.
+The installer verifies the published checksum and refuses to install if one is unavailable.
 
-**Homebrew**:
+Use a custom prefix to avoid installing under `/usr/local`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/reloading01/certstream-server-rust/main/install.sh | PREFIX="$HOME/.local" sh
+```
+
+Pin a release with `VERSION`, for example `VERSION=v1.5.6`.
+
+### Homebrew
 
 ```bash
 brew install reloading01/tap/certstream-server-rust
 ```
 
-**Debian, Ubuntu** (repository, so `apt upgrade` keeps it current):
+### Debian / Ubuntu
 
 ```bash
 sudo install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://reloading01.github.io/packages/key.gpg | sudo tee /etc/apt/keyrings/certstream.asc > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/certstream.asc] https://reloading01.github.io/packages/apt stable main" | sudo tee /etc/apt/sources.list.d/certstream.list
-sudo apt update && sudo apt install certstream-server-rust
+
+echo "deb [signed-by=/etc/apt/keyrings/certstream.asc] https://reloading01.github.io/packages/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/certstream.list
+
+sudo apt update
+sudo apt install certstream-server-rust
 sudo systemctl enable --now certstream-server-rust
 ```
 
-**Fedora, RHEL, openSUSE**:
+### Fedora / RHEL / openSUSE
 
 ```bash
 sudo rpm --import https://reloading01.github.io/packages/key.gpg
+
 sudo tee /etc/yum.repos.d/certstream.repo > /dev/null <<'REPO'
 [certstream]
 name=certstream-server-rust
@@ -91,25 +88,32 @@ gpgcheck=1
 repo_gpgcheck=1
 gpgkey=https://reloading01.github.io/packages/key.gpg
 REPO
+
 sudo dnf install certstream-server-rust
 sudo systemctl enable --now certstream-server-rust
 ```
 
-Both repositories are signed; package managers verify every update against the key. Prefer a single file? The `.deb` and `.rpm` are also attached to each [release](https://github.com/reloading01/certstream-server-rust/releases/latest), installable with `apt install ./file.deb` or `rpm -i file.rpm`.
+Both package repositories are signed. `.deb` and `.rpm` files are also attached to each [GitHub release](https://github.com/reloading01/certstream-server-rust/releases/latest).
 
-Either way you get a systemd unit that runs under `DynamicUser` and keeps CT log positions in `/var/lib/certstream`. Settings go in `/etc/default/certstream-server-rust`.
+The packaged systemd unit runs under `DynamicUser`, stores CT log positions in `/var/lib/certstream`, and reads settings from `/etc/default/certstream-server-rust`.
 
-**Cargo**:
+### Cargo
 
 ```bash
 cargo install certstream-server-rust
 ```
 
-**Docker**:
+### Docker
+
+Minimal:
 
 ```bash
 docker run -d -p 8080:8080 ghcr.io/reloading01/certstream-server-rust:latest
+```
 
+With persistent state and connection limits:
+
+```bash
 docker run -d \
   --name certstream \
   --restart unless-stopped \
@@ -120,82 +124,111 @@ docker run -d \
   ghcr.io/reloading01/certstream-server-rust:latest
 ```
 
-Whichever way you install it, the server needs no configuration to start: it discovers the CT logs, serves WebSocket on `:8080`, and persists its position so a restart resumes rather than replays.
+No configuration is required for a basic deployment. The server discovers CT logs automatically, serves WebSocket on port `8080`, and persists its position so restarts resume instead of replaying log history.
+
+### Docker Compose
+
+```bash
+docker compose up -d
+```
 
 ## Configuration
 
-Everything below is optional. Environment variables override the YAML file, which overrides the defaults.
+All settings are optional. Environment variables override YAML values, and YAML values override built-in defaults.
 
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CERTSTREAM_HOST` | 0.0.0.0 | Bind address |
-| `CERTSTREAM_PORT` | 8080 | HTTP/WebSocket port |
-| `CERTSTREAM_LOG_LEVEL` | info | debug, info, warn, error |
-| `CERTSTREAM_BUFFER_SIZE` | 1000 | Broadcast buffer |
-
-**Protocols**
+### General
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `CERTSTREAM_WS_ENABLED` | true | Enable WebSocket |
-| `CERTSTREAM_SSE_ENABLED` | false | Enable SSE (opt-in, like the REST API) |
-| `CERTSTREAM_METRICS_ENABLED` | true | Enable /metrics endpoint |
-| `CERTSTREAM_HEALTH_ENABLED` | true | Enable /health endpoint |
-| `CERTSTREAM_EXAMPLE_JSON_ENABLED` | true | Enable /example.json endpoint |
-| `CERTSTREAM_API_ENABLED` | false | Enable REST API endpoints |
+| --- | --- | --- |
+| `CERTSTREAM_HOST` | `0.0.0.0` | Bind address |
+| `CERTSTREAM_PORT` | `8080` | HTTP/WebSocket port |
+| `CERTSTREAM_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, or `error` |
+| `CERTSTREAM_BUFFER_SIZE` | `1000` | Broadcast buffer size |
 
-**Stream Types**
+### Protocols
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `CERTSTREAM_STREAM_FULL_ENABLED` | true | Enable full stream (DER + chain, ~4-5 KB/cert) |
-| `CERTSTREAM_STREAM_LITE_ENABLED` | true | Enable lite stream (~1 KB/cert) |
-| `CERTSTREAM_STREAM_DOMAINS_ONLY_ENABLED` | true | Enable domains-only stream (~200 B/cert) |
+| --- | --- | --- |
+| `CERTSTREAM_WS_ENABLED` | `true` | Enable WebSocket |
+| `CERTSTREAM_SSE_ENABLED` | `false` | Enable SSE |
+| `CERTSTREAM_METRICS_ENABLED` | `true` | Enable `/metrics` |
+| `CERTSTREAM_HEALTH_ENABLED` | `true` | Enable `/health` |
+| `CERTSTREAM_EXAMPLE_JSON_ENABLED` | `true` | Enable `/example.json` |
+| `CERTSTREAM_API_ENABLED` | `false` | Enable REST API endpoints |
 
-Disabling a stream type removes its WebSocket/SSE route and skips JSON serialization entirely, saving CPU and outbound bandwidth.
-
-**Connection Limiting**
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CERTSTREAM_CONNECTION_LIMIT_ENABLED` | false | Enable connection limits |
-| `CERTSTREAM_CONNECTION_LIMIT_MAX_CONNECTIONS` | 10000 | Max total connections |
-| `CERTSTREAM_CONNECTION_LIMIT_PER_IP_LIMIT` | 100 | Max per IP |
-
-**Authentication**
+### Stream types
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `CERTSTREAM_AUTH_ENABLED` | false | Enable token auth |
-| `CERTSTREAM_AUTH_TOKENS` | - | Comma-separated tokens |
-| `CERTSTREAM_AUTH_HEADER_NAME` | Authorization | Auth header |
+| --- | --- | --- |
+| `CERTSTREAM_STREAM_FULL_ENABLED` | `true` | Full stream with DER and chain, ~4-5 KB/cert |
+| `CERTSTREAM_STREAM_LITE_ENABLED` | `true` | Lite stream, ~1 KB/cert |
+| `CERTSTREAM_STREAM_DOMAINS_ONLY_ENABLED` | `true` | Domains-only stream, ~200 B/cert |
 
-**Rate Limiting**
+Disabling a stream removes its WebSocket/SSE route and skips serialization for that format.
+
+### Connection limiting
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `CERTSTREAM_RATE_LIMIT_ENABLED` | false | Enable rate limiting |
+| --- | --- | --- |
+| `CERTSTREAM_CONNECTION_LIMIT_ENABLED` | `false` | Enable connection limits |
+| `CERTSTREAM_CONNECTION_LIMIT_MAX_CONNECTIONS` | `10000` | Maximum total connections |
+| `CERTSTREAM_CONNECTION_LIMIT_PER_IP_LIMIT` | `100` | Maximum connections per IP |
 
-Single-tier per-IP rate limit (token bucket + sliding window). Authenticated and unauthenticated clients hit the same per-source-IP ceiling — auth gates *who* may connect, rate-limit gates *how often*. YAML config:
+### Authentication
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CERTSTREAM_AUTH_ENABLED` | `false` | Enable token authentication |
+| `CERTSTREAM_AUTH_TOKENS` | none | Comma-separated tokens |
+| `CERTSTREAM_AUTH_HEADER_NAME` | `Authorization` | Authentication header |
+
+### Rate limiting
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CERTSTREAM_RATE_LIMIT_ENABLED` | `false` | Enable request rate limiting |
+
+Rate limiting is per source IP. Authentication controls who may connect; rate limiting controls request frequency.
 
 ```yaml
 rate_limit:
   enabled: true
-  max_tokens: 100         # bucket capacity per IP
-  refill_rate: 10         # tokens/second
-  burst: 20               # extra credits per burst_window
+  max_tokens: 100
+  refill_rate: 10
+  burst: 20
   window_seconds: 60
   window_max_requests: 1000
   burst_window_seconds: 10
 ```
 
-**Hybrid tile fetching for logs without a checkpoint**
+### CT log settings
 
-Some RFC 6962 logs serve static-CT tile data but answer `/checkpoint` with a 404. TrustAsia's `log2026a`, `log2026b` and `hetu2027` are the current examples, and their `get-entries` is slow enough to matter: 25-31 seconds for 256 entries, against under a second for the same entries from a warm tile. Left on the RFC 6962 path they fall steadily behind, by hundreds of thousands of entries over a few hours.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CERTSTREAM_CT_LOG_STATE_FILE` | `certstream_state.json` | State file path |
+| `CERTSTREAM_CT_LOG_RETRY_MAX_ATTEMPTS` | `3` | Maximum retry attempts |
+| `CERTSTREAM_CT_LOG_REQUEST_TIMEOUT_SECS` | `30` | Request timeout |
+| `CERTSTREAM_CT_LOG_BATCH_SIZE` | `1024` | Requested entries per `get-entries` call; servers may clamp it |
+| `CERTSTREAM_CT_LOG_FETCH_CONCURRENCY` | `4` | Concurrent range/tile fetches per watcher during catch-up, 1-16 |
+| `CERTSTREAM_USER_AGENT` | `certstream-server-rust/{VERSION}` | User-Agent for CT log and catalog requests |
+| `CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS` | none | Comma-separated operators that should use HTTP/1.1 |
 
-`tree_size_source: get_sth` reads the tree head from `/ct/v1/get-sth` and the entries from `/tile/data`:
+RFC 6962 and static-CT watchers can also be disabled independently with `CERTSTREAM_RFC6962_ENABLED` and `CERTSTREAM_STATIC_CT_ENABLED`.
+
+A blank `CERTSTREAM_USER_AGENT` falls back to the default. Some operators may apply different rate limits to clients that include contact information in the User-Agent.
+
+### Hot reload
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CERTSTREAM_HOT_RELOAD_ENABLED` | `false` | Enable hot reload |
+| `CERTSTREAM_HOT_RELOAD_WATCH_PATH` | none | Configuration file to watch |
+
+## Advanced CT log configuration
+
+### Hybrid tile fetching without checkpoints
+
+Some RFC 6962 logs expose static-CT tile data but do not publish `/checkpoint`. For those logs, `tree_size_source: get_sth` can use `/ct/v1/get-sth` for the tree size while fetching entries from `/tile/data`.
 
 ```yaml
 static_logs:
@@ -205,34 +238,27 @@ static_logs:
     tree_size_source: get_sth
 ```
 
-The entry replaces the catalog-discovered RFC 6962 watcher for the same `log_id`, so the log is fetched once, over tiles.
+The override replaces the catalog-discovered RFC 6962 watcher for the same `log_id`, so the log is fetched only once.
 
-Three things to know before enabling it. There is no checkpoint, so nothing about these logs is verifiable on our side and they are ingested unverified; the server logs a warning at startup saying so. The head is held at the last full tile, because a log that publishes no checkpoint is not obliged to serve partial tiles and these do not, so the newest 0-255 entries wait for their tile to fill.
+There are two operational trade-offs:
 
-And busy logs need more in-flight fetches than the default. Tiles near the head miss the CDN cache and take seconds each, so `fetch_concurrency: 4` caps a watcher at roughly 50 entries/s. Measured across TrustAsia's three logs: 4 gave ~50 entries/s in total, 16 gave ~276 entries/s, which is enough for two of the three to reach zero lag and hold it.
+- Without a checkpoint, the server cannot verify the log on its side and logs a warning at startup.
+- The watcher stops at the last full tile. The newest 0-255 entries wait until the tile is complete when partial tiles are unavailable.
+
+Busy tiled logs may also need more fetch concurrency. In the measured TrustAsia case, increasing `fetch_concurrency` from `4` to `16` raised aggregate throughput from roughly 50 entries/s to roughly 276 entries/s.
 
 ```yaml
 ct_log:
   fetch_concurrency: 16
 ```
 
-An override that replaces a discovered log inherits that log's operator name, so it lands in the same rate-limit bucket as the operator's other logs. For a log that exists in no catalog, name the operator yourself with `operator:`, otherwise it shares a generic bucket with every other unattributed local entry.
+An override for a catalog-discovered log inherits its operator name. For a local log that is not present in a catalog, set `operator` explicitly if it should use a specific operator rate-limit bucket.
 
-**CT Log Settings**
+### Forcing HTTP/1.1 for an operator
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CERTSTREAM_CT_LOG_STATE_FILE` | certstream_state.json | State file path |
-| `CERTSTREAM_CT_LOG_RETRY_MAX_ATTEMPTS` | 3 | Max retry attempts |
-| `CERTSTREAM_CT_LOG_REQUEST_TIMEOUT_SECS` | 30 | Request timeout |
-| `CERTSTREAM_CT_LOG_BATCH_SIZE` | 1024 | Entries requested per get-entries call (servers clamp to their own max) |
-| `CERTSTREAM_CT_LOG_FETCH_CONCURRENCY` | 4 | Concurrent range/tile fetches per watcher during catch-up (1-16) |
-| `CERTSTREAM_USER_AGENT` | certstream-server-rust/{VERSION} | User-Agent for all outbound HTTP (CT log fetches and catalog fetches). Some operators (e.g. Geomys) apply a more generous rate limit tier to clients that include a contact email. Blank falls back to the default. |
-| `CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS` | - | Comma-separated operator names whose watchers fetch over HTTP/1.1 instead of HTTP/2 (see below) |
+Some CT operators apply limits per TCP connection. With HTTP/2, several watchers on the same host can share one connection and therefore one connection-level quota.
 
-**Forcing HTTP/1.1 per operator**
-
-Some operators (DigiCert) throttle per TCP connection rather than per IP. Under HTTP/2 reqwest multiplexes every request for a host onto a single connection, so that per-connection quota ends up capping the whole process — DigiCert serves several logs from one host (`wyvern.ct.digicert.com`), so their watchers all share it. Listing an operator gives its watchers a dedicated HTTP/1.1 client, where each in-flight fetch needs its own connection and therefore carries its own quota:
+Operators listed under `force_http1_operators` use a dedicated HTTP/1.1 client:
 
 ```yaml
 ct_log:
@@ -240,134 +266,126 @@ ct_log:
     - DigiCert
 ```
 
-This does not raise the request rate — the per-operator token bucket (`default_operator_rate_limit_ms`, 500 ms) still gates every fetch. It only spreads the same requests across more connections; `fetch_concurrency` sets how many of those stay warm in the pool between polls. Operator names are matched case-insensitively and ignoring punctuation, the same as `operator_rate_limits`; a name that matches no discovered log is logged as a warning at startup.
-
-**Hot Reload**
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CERTSTREAM_HOT_RELOAD_ENABLED` | false | Enable hot reload |
-| `CERTSTREAM_HOT_RELOAD_WATCH_PATH` | - | Config file to watch |
-
-### Build from Source
-
-```bash
-# Docker Compose
-docker compose up -d
-```
+This does not increase the configured outbound request rate. The per-operator token bucket still gates requests; HTTP/1.1 only spreads them across separate connections. Operator matching is case-insensitive and ignores punctuation. Unmatched names are reported at startup.
 
 ## API
 
 ### WebSocket
 
-| Endpoint | Description |
-|----------|-------------|
-| `ws://host:8080/` | Lite stream (no DER/chain) |
+| Endpoint | Stream |
+| --- | --- |
+| `ws://host:8080/` | Lite |
 | `ws://host:8080/full-stream` | Full data with DER and chain |
-| `ws://host:8080/domains-only` | Just domain names (`message_type: "dns_entries"`, `data` is a bare string array) |
+| `ws://host:8080/domains-only` | Domain names only |
+
+The domains-only stream uses `message_type: "dns_entries"` and returns `data` as a string array.
 
 ### SSE
 
-| Endpoint | Description |
-|----------|-------------|
-| `http://host:8080/sse` | Lite (default) |
+SSE is disabled by default. Enable it with `CERTSTREAM_SSE_ENABLED=true`.
+
+| Endpoint | Stream |
+| --- | --- |
+| `http://host:8080/sse` | Lite |
 | `http://host:8080/sse?stream=full` | Full |
 | `http://host:8080/sse?stream=domains` | Domains only |
 
-### HTTP
+### HTTP endpoints
 
 | Endpoint | Description |
-|----------|-------------|
-| `/health` | Basic health check (returns "OK") |
-| `/health/deep` | Detailed health with log status, connections, uptime (JSON) |
+| --- | --- |
+| `/health` | Basic health check; returns `OK` |
+| `/health/deep` | Detailed log health, connection count, and uptime |
 | `/metrics` | Prometheus metrics |
-| `/example.json` | Example message |
+| `/example.json` | Example certificate message |
 
-### Memory
+### REST API
 
-Steady state is roughly 85 MB resident at 420 certs/s across all 45 trusted logs, against a live heap of ~50 MB. The rest is allocator working set.
+The REST API is disabled by default. Enable it with `CERTSTREAM_API_ENABLED=true`.
 
-The binary ships jemalloc defaults tuned for this workload: `thp:never,narenas:4,background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000`. `thp:never` matters most. On a host running transparent huge pages in `always` mode the kernel backs jemalloc's mappings with 2 MiB huge pages, and a partly free huge page keeps far more memory resident than the live data in it, so RSS parks at several times the live heap (measured: 358 MB resident, 206 MB of it `AnonHugePages`). Check your host with:
+| Endpoint | Description |
+| --- | --- |
+| `GET /api/stats` | Uptime, connections, throughput, and cache statistics |
+| `GET /api/logs` | CT log health and position information |
+| `GET /api/cert/{hash}` | Lookup by SHA-256, SHA-1, or fingerprint |
+
+Examples:
+
+```bash
+curl http://localhost:8080/api/stats
+curl http://localhost:8080/api/logs
+curl http://localhost:8080/api/cert/F0E2023BCAACBF9D40A4E2C767E77B46BA96AE81240EBC525FA43C0A50BFACDE
+curl http://localhost:8080/health/deep
+```
+
+## Memory
+
+At the measured workload of roughly 420 certs/s across 45 trusted logs, steady-state resident memory is about 85 MB with a live heap of about 50 MB.
+
+The binary ships with jemalloc defaults tuned for this workload:
+
+```text
+thp:never,narenas:4,background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000
+```
+
+`thp:never` avoids resident-memory inflation on hosts with transparent huge pages set to `always`. Check the host setting with:
 
 ```bash
 cat /sys/kernel/mm/transparent_hugepage/enabled
 ```
 
-Override any of it without rebuilding, for example to trade memory for less purge CPU:
+jemalloc settings can be overridden without rebuilding:
 
 ```bash
-docker run -e _RJEM_MALLOC_CONF=dirty_decay_ms:30000,muzzy_decay_ms:30000 \
+docker run \
+  -e _RJEM_MALLOC_CONF=dirty_decay_ms:30000,muzzy_decay_ms:30000 \
   ghcr.io/reloading01/certstream-server-rust:latest
 ```
 
-`/metrics` exposes the allocator's own view. `certstream_jemalloc_allocated_bytes` is the live heap and `certstream_jemalloc_resident_bytes` is jemalloc's own estimate of the resident pages behind it, which is not the same thing as the kernel's RSS: a gap between the two is allocator behaviour, growth in `allocated` is the application holding data.
+Useful allocator metrics include:
 
-Dedup is the largest single consumer that scales with traffic. Its steady-state size is ingest rate × TTL, bounded by `dedup.capacity`: at 420 certs/s a 15-minute window wants ~354K entries, so the default 200K cap binds and the effective window narrows to keep it. `certstream_dedup_effective_ttl_seconds` reports the window actually in force. Raise `dedup.capacity` to buy deeper cross-log dedup at roughly 100 bytes per entry.
+- `certstream_jemalloc_allocated_bytes`: live heap
+- `certstream_jemalloc_resident_bytes`: allocator estimate of resident pages
 
-### REST API
+A widening gap between the two points to allocator behavior; growth in `allocated` means the application itself is retaining more live data.
 
-Enable with `CERTSTREAM_API_ENABLED=true`.
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/stats` | Server statistics (uptime, connections, throughput, cache) |
-| `GET /api/logs` | CT log health status (healthy, degraded, unhealthy counts) |
-| `GET /api/cert/{hash}` | Lookup certificate by SHA256, SHA1, or fingerprint |
-
-Example:
-```bash
-# Get server stats
-curl http://localhost:8080/api/stats
-
-# Get CT log health
-curl http://localhost:8080/api/logs
-
-# Lookup certificate by SHA256 hash
-curl http://localhost:8080/api/cert/F0E2023BCAACBF9D40A4E2C767E77B46BA96AE81240EBC525FA43C0A50BFACDE
-
-# Deep health check (returns JSON with detailed status)
-curl http://localhost:8080/health/deep
-# {"status":"healthy","logs_healthy":27,"logs_degraded":0,"logs_unhealthy":0,"logs_total":27,"active_connections":0,"uptime_secs":3600}
-```
+Dedup memory scales with ingest rate and TTL, bounded by `dedup.capacity`. At 420 certs/s, a 15-minute window would require roughly 354K entries, so the default 200K capacity shortens the effective window. `certstream_dedup_effective_ttl_seconds` reports the active window.
 
 ## Performance
 
-Benchmarked against v1.5.2 on the same host — default config, 100 concurrent WebSocket clients pulling the lite stream, 10-minute plateau window:
+Measured against v1.5.2 on the same host with the default configuration, 100 concurrent WebSocket clients on the lite stream, and a 10-minute plateau window:
 
-| Metric (vs v1.5.2, identical conditions) | Change |
-|------------------------------------------|-------:|
-| Sustained delivered throughput | ~+70% |
-| CPU per delivered message | ~−50% |
-| RSS after catch-up bursts | returns to idle baseline (previously parked at peak) |
-| Cold start to first cert | seconds |
+| Metric | Result |
+| --- | ---: |
+| Sustained delivered throughput | ~70% higher |
+| CPU per delivered message | ~50% lower |
+| RSS after catch-up | Returns to the idle baseline |
 
-Every certificate is serialized once and broadcast to all subscribers via an `Arc<PreSerializedMessage>` with zero-copy text frames; when no clients are connected, serialization is skipped entirely. Catch-up fetches are pipelined per watcher while the per-operator request rate stays within the same politeness budget as sequential fetching. Memory stays flat over time — jemalloc returns burst allocations to the OS instead of parking RSS at the high-water mark. The default 200K-entry cross-log dedup window costs only a few MiB and is tunable via `CERTSTREAM_DEDUP_CAPACITY`.
+Certificate payloads are serialized once and shared across subscribers. Serialization is skipped when there are no subscribers. Catch-up fetches are pipelined per watcher without increasing the configured per-operator request rate.
 
-## Certificate Transparency Logs
+## Certificate Transparency logs
 
-Certstream monitors every Chrome- and Apple-trusted CT log. A sample of operators:
+The server monitors Chrome- and Apple-trusted CT logs. Examples include:
 
 | Provider | Logs |
-|----------|------|
+| --- | --- |
 | Google | Argon, Xenon |
 | Cloudflare | Nimbus |
 | DigiCert | Wyvern, Sphinx |
 | Sectigo | Elephant, Tiger, Mammoth, Sabre |
-| Let's Encrypt | Willow, Sycamore (Static CT — 2025h2/2026h1) |
+| Let's Encrypt | Willow, Sycamore |
 | TrustAsia | HETU, Luoshu |
 | Geomys | Tuscolo |
 | IPng Networks | Halloumi, Gouda |
 
-## Release Notes
+## Release notes
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for version history.
 
 ## Support
 
-I work on this in my free time. If you find it useful, just using it, starring the repo, or sharing it with someone who needs it already means a lot to me that's the kind of thing that keeps me going.
-
-If you'd like to go a step further, you can also [sponsor me on GitHub](https://github.com/sponsors/reloading01). No pressure though, every form of support is appreciated.
+If the project is useful to you, starring the repository or sharing it with others is appreciated. You can also [sponsor the project on GitHub](https://github.com/sponsors/reloading01).
 
 ## License
 
-MIT - see [LICENSE](LICENSE)
+MIT. See [LICENSE](LICENSE).

@@ -1,24 +1,33 @@
-# Release Notes v1.5.6
+# Release Notes
+
+## v1.5.6: Distribution
 
 **Release date:** August 25, 2026
 
-Distribution. Prebuilt binaries, signed apt and dnf repositories, Homebrew, and crates.io. No changes to the server itself.
+This release changes distribution only. The server binary is identical to v1.5.5.
 
-## Installing without a container
+### Prebuilt binaries and install script
 
-Until now the only packaged way to run this was the container image; everyone else built from source. That is now four ways, all carrying checksums:
+Prebuilt binaries are now available for Linux and macOS:
+
+- Linux: `x86_64` and `aarch64`, statically linked with musl
+- macOS: Intel and Apple Silicon
+
+Install with:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/reloading01/certstream-server-rust/main/install.sh | sh
 ```
 
-The script picks the right build for the platform, verifies the published SHA-256, and refuses to install if a checksum is missing. `PREFIX=$HOME/.local` keeps it out of `/usr/local` and away from root.
+The script selects the correct build, verifies the published SHA-256 checksum, and aborts if a checksum is missing. Use `PREFIX=$HOME/.local` to install outside `/usr/local` without root.
 
-Static musl builds for `x86_64` and `aarch64` Linux, plus both macOS architectures, are attached to this release. Linux builds are static, so glibc version does not matter. They carry no `target-cpu` tuning, unlike the container image, because a downloaded binary has to start on whatever CPU it lands on.
+Downloaded binaries do not use `target-cpu` tuning so they remain portable across supported CPUs. The container image keeps its existing build tuning.
 
-## apt and dnf repositories
+### apt and dnf repositories
 
-Signed repositories, so updates arrive with the rest of the system rather than by re-downloading a file:
+Signed package repositories are available for system-managed upgrades.
+
+For apt:
 
 ```bash
 sudo install -m 0755 -d /etc/apt/keyrings
@@ -27,13 +36,17 @@ echo "deb [signed-by=/etc/apt/keyrings/certstream.asc] https://reloading01.githu
 sudo apt update && sudo apt install certstream-server-rust
 ```
 
-The dnf form is on the [repository page](https://reloading01.github.io/packages/). Both are signed with `C5D7 B0D1 42A6 1EF0 FB1A BE95 462A 111C FD91 20EE`, checked on every update.
+The dnf instructions are on the [package repository page](https://reloading01.github.io/packages/). Both repositories are signed with:
 
-Packages install a systemd unit that runs under `DynamicUser`, so nothing creates a system account, and `StateDirectory` gives it `/var/lib/certstream` for CT log positions. That file is what makes a restart resume instead of replaying from each log's head. Configuration goes in `/etc/default/certstream-server-rust`.
+```text
+C5D7 B0D1 42A6 1EF0 FB1A BE95 462A 111C FD91 20EE
+```
 
-The unit ships with the usual hardening on (`ProtectSystem=strict`, `NoNewPrivileges`, a syscall filter) and a commented `MemoryMax` line. Steady state is around 80 MB resident; leave headroom for catch-up after an outage before capping it.
+Packages include a systemd unit with `DynamicUser`, `StateDirectory=/var/lib/certstream`, `ProtectSystem=strict`, `NoNewPrivileges`, and a syscall filter. Configuration is read from `/etc/default/certstream-server-rust`.
 
-## Homebrew and crates.io
+A commented `MemoryMax` setting is included. Steady-state RSS is around 80 MB, but catch-up after downtime needs additional headroom.
+
+### Homebrew and crates.io
 
 ```bash
 brew install reloading01/tap/certstream-server-rust
@@ -43,79 +56,87 @@ brew install reloading01/tap/certstream-server-rust
 cargo install certstream-server-rust
 ```
 
-The tap formula is rewritten by the release workflow on every tag, so the version tracks releases without manual edits.
+The Homebrew formula is updated automatically by the release workflow for each tag.
 
-## Engineering blog
+### Engineering notes
 
-[certstream.dev/blog](https://certstream.dev/blog/) now carries write-ups of problems found running this against every trusted log: [transparent huge pages holding 206 MB the allocator could not return](https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html), [logs that serve tiles but publish no checkpoint](https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html), and [an HTTP/2 theory that the connection count confirmed and the throughput refuted](https://certstream.dev/blog/http2-multiplexing-vs-per-connection-rate-limits.html).
+Operational write-ups are available at [certstream.dev/blog](https://certstream.dev/blog/), including:
 
-## Upgrade
+- [jemalloc, transparent huge pages, and retained RSS](https://certstream.dev/blog/jemalloc-transparent-huge-pages-rss.html)
+- [CT logs that serve tiles without checkpoints](https://certstream.dev/blog/ct-logs-tiles-without-checkpoint.html)
+- [HTTP/2 multiplexing and per-connection rate limits](https://certstream.dev/blog/http2-multiplexing-vs-per-connection-rate-limits.html)
 
-Nothing to do. The binary is identical to v1.5.5; only packaging changed.
+### Upgrade
+
+No server-side migration is required. The binary is unchanged from v1.5.5.
 
 ```bash
 docker pull ghcr.io/reloading01/certstream-server-rust:1.5.6
 ```
 
-# Release Notes v1.5.5
+---
+
+## v1.5.5: Memory, observability, and hybrid tile fetching
 
 **Release date:** August 25, 2026
 
-A memory fix, the observability that was missing to find it, and tile fetching for logs that serve tiles without a checkpoint. Resident memory on hosts running transparent huge pages in `always` mode drops from ~360 MB to ~85 MB with no change to the ingest path. No wire-format changes; one added field in `/api/stats`.
+This release fixes excessive resident memory on hosts using transparent huge pages in `always` mode, adds allocator and CT lag metrics, and supports tile fetching for logs that expose `/tile/data` but no checkpoint. There are no wire-format changes. `/api/stats` gains one field.
 
-## Resident memory: jemalloc defaults
+### jemalloc defaults
 
-v1.5.3 made jemalloc the global allocator but left it entirely unconfigured, and three of its defaults work against this workload.
+v1.5.3 switched the process to jemalloc but kept its defaults. Three defaults were a poor fit for this workload: transparent huge pages, arena count, and decay behavior.
 
-The dominant one is transparent huge pages. When the host runs THP in `always` mode, the kernel backs jemalloc's mappings with 2 MiB huge pages. jemalloc frees at 4 KiB granularity, and a partly free huge page keeps far more memory resident than the live data in it until the kernel splits or reclaims it, so RSS parks at several times the live heap. Measured over two hours against all 45 Chrome- and Apple-trusted logs at ~420 certs/s: 358 MB RSS, of which 206 MB was `AnonHugePages`, against a live heap of 52 MB. Hosts running THP in `madvise` mode (Debian and Ubuntu defaults) never saw this, which is why it went unreported.
+On a host with THP set to `always`, a two-hour run against all 45 Chrome- and Apple-trusted logs at about 420 certs/s measured 358 MB RSS, including 206 MB of `AnonHugePages`, while the live heap was 52 MB. Hosts using THP `madvise`, including the Debian and Ubuntu defaults, did not show the same behavior.
 
-The other two compound it. jemalloc sizes its arena count as 4 × logical CPUs, and inside a container that reads the *host* CPU count: 72 arenas on an 18-core machine, each with an independent dirty-page pool and decay clock, serving a runtime that only has 4 worker threads. And decay only advances when an arena is touched, so the arenas belonging to bursty watcher tasks held their dirty pages indefinitely.
+jemalloc also sized arenas from the host CPU count. On an 18-core host this produced 72 arenas for a runtime using four worker threads, leaving more dirty-page pools and metadata than the process needed. Bursty watcher arenas could also retain dirty pages because decay advances when an arena is touched.
 
-The binary now carries defaults for all three:
+The binary now embeds:
 
-```
+```text
 thp:never,narenas:4,background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000
 ```
 
 Measured on the same workload:
 
-| | v1.5.4 | v1.5.5 |
-| --- | --: | --: |
+| Metric | v1.5.4 | v1.5.5 |
+| --- | ---: | ---: |
 | RSS, THP `always` host | 358 MB | 85 MB |
 | RSS, THP `madvise` host | 88 MB | 76 MB |
 | `AnonHugePages` | 206 MB | 6 MB |
 | jemalloc `retained` | 116 MB | 34 MB |
-| arena metadata | 11.8 MB | 4.8 MB |
-| live heap (`allocated`) | 52 MB | 49 MB |
+| Arena metadata | 11.8 MB | 4.8 MB |
+| Live heap (`allocated`) | 52 MB | 49 MB |
 
-The live heap never moved. Nothing in the ingest path was holding memory it should not have; the pages simply were not going back.
+The live heap is effectively unchanged; the difference is allocator residency rather than application-held data.
 
-These are defaults, not policy. jemalloc reads `_RJEM_MALLOC_CONF` after the embedded symbol, so any of it can be overridden without a rebuild:
+These are defaults, not hard policy. Override them without rebuilding through `_RJEM_MALLOC_CONF`:
 
 ```bash
 docker run -e _RJEM_MALLOC_CONF=narenas:8,dirty_decay_ms:20000 ghcr.io/reloading01/certstream-server-rust:1.5.5
 ```
 
-`thp` and `background_thread` are Linux-only in jemalloc, so non-Linux builds get the arena and decay settings alone. Passing them anyway made jemalloc print `No THP support` and `supports pthread only` to stderr on macOS.
+`thp` and `background_thread` are Linux-only. Non-Linux builds use the arena and decay settings without those options.
 
-## Allocator metrics
+### Allocator metrics
 
-Six gauges, so the next version of this question is answerable from `/metrics` instead of from a heap profiler:
+Six jemalloc gauges are now exported:
 
 | Metric | Meaning |
-| ------ | ------- |
-| `certstream_jemalloc_allocated_bytes` | live heap: what the process actually holds |
-| `certstream_jemalloc_resident_bytes` | physically resident pages mapped by the allocator |
-| `certstream_jemalloc_active_bytes` | active pages; the gap over `allocated` is size-class rounding |
-| `certstream_jemalloc_mapped_bytes` | address space mapped |
-| `certstream_jemalloc_retained_bytes` | returned to the OS, virtual mapping retained |
-| `certstream_jemalloc_metadata_bytes` | allocator's own bookkeeping, scales with arena count |
+| --- | --- |
+| `certstream_jemalloc_allocated_bytes` | Live heap |
+| `certstream_jemalloc_resident_bytes` | Physically resident allocator pages |
+| `certstream_jemalloc_active_bytes` | Active pages |
+| `certstream_jemalloc_mapped_bytes` | Mapped address space |
+| `certstream_jemalloc_retained_bytes` | Virtual mappings retained after pages are returned |
+| `certstream_jemalloc_metadata_bytes` | Allocator bookkeeping |
 
-`allocated` versus `resident` is the diagnostic pair: a gap between them is allocator behaviour, growth in `allocated` is the application holding data. The heartbeat log line carries both as `heap_allocated_mib` and `heap_resident_mib`.
+`allocated` versus `resident` is the useful diagnostic pair: growth in `allocated` points to live application data, while a large resident gap points to allocator behavior. The heartbeat log also reports `heap_allocated_mib` and `heap_resident_mib`.
 
-## Hybrid tile fetching
+### Hybrid tile fetching
 
-`tree_size_source: get_sth` lets a static-CT watcher read the tree head from RFC 6962 `/ct/v1/get-sth` while reading entries from `/tile/data`. It exists for logs that serve tile data but answer `/checkpoint` with a 404, which today means TrustAsia's `log2026a`, `log2026b` and `hetu2027`.
+`static_logs[].tree_size_source: get_sth` allows a static-CT watcher to read tree size from RFC 6962 `/ct/v1/get-sth` while reading entries from `/tile/data`.
+
+This is intended for logs such as TrustAsia `log2026a`, `log2026b`, and `hetu2027`, which serve tile data but return 404 for `/checkpoint`.
 
 ```yaml
 static_logs:
@@ -125,99 +146,120 @@ static_logs:
     tree_size_source: get_sth
 ```
 
-The reason to bother is throughput. Fetching the same 256 entries from `log2026a` near the head, measured 2026-08-25:
+A comparison near the head of `log2026a`, measured on 2026-08-25 for the same 256 entries:
 
 | Path | Size | Time |
-| ---- | ---: | ---: |
+| --- | ---: | ---: |
 | `/tile/data/x010/x076/918` | 189 KB | 5.96s cold, 0.36s warm |
 | `get-entries?start=…&end=…` | 696 KB | 30.4s / 30.7s / 25.2s |
 
-On the RFC 6962 path these logs fall behind and stay behind. Over a two-hour run against all 45 trusted logs, with `total_errors = 0` and no rate limiting on any of them: `log2026b` 278,890 entries behind the head, `log2026a` 79,392, `hetu2027` 37,898. The same operator's Luoshu2027, which does publish a checkpoint and is read over tiles, sat 1,310 entries behind.
+Over a two-hour run against all 45 trusted logs with `total_errors = 0` and no operator rate limiting, the RFC 6962 path left `log2026b` 278,890 entries behind, `log2026a` 79,392 behind, and `hetu2027` 37,898 behind. TrustAsia Luoshu2027, which publishes a checkpoint and is fetched over tiles, was 1,310 entries behind.
 
-Two consequences worth stating plainly. There is no checkpoint, so nothing about these logs is verifiable on our side and a warning is logged at startup for each one; this is a deliberate trade of verifiability for data, appropriate because this server broadcasts certificates rather than monitoring logs cryptographically. And the head is held at the last full tile: static-ct-api only requires partial tiles for tree sizes a checkpoint was published for, so a log that publishes none owes none, and TrustAsia's do not serve them. The newest 0-255 entries wait for their tile to fill.
+There are two trade-offs:
 
-An override carrying `tree_size_source: get_sth` is allowed to replace a catalog-discovered RFC 6962 log with a static-CT watcher for the same `log_id`, which is otherwise rejected as a silent protocol switch. Without the declaration that rejection still stands, and the exemption does not work in reverse: it will not let an RFC 6962 override take over a tiled log.
+- Without a checkpoint, the server cannot verify these logs locally. A warning is emitted at startup. This mode favors receiving certificate data over cryptographic log monitoring.
+- The watcher stops at the last full tile. Without a published checkpoint, the static-ct-api does not require partial tiles, and these TrustAsia logs do not serve them. The newest 0-255 entries wait until the tile fills.
 
-Two operational notes came out of running this against the real logs. Overrides now inherit the operator name of the log they replace, and `static_logs[].operator` sets it for a log that exists in no catalog. Outbound rate limits are keyed by operator, and every local static entry used to be stamped `Static CT`, so three overrides for one operator shared a single bucket under a name matching no `operator_rate_limits` key while that operator's other logs ran in their own. And busy logs want a higher `fetch_concurrency` than the default: tiles near the head miss the CDN cache and take seconds each, so 4 in flight caps a watcher near 50 entries/s. Measured across the three TrustAsia logs, 16 in flight gave ~276 entries/s, enough for two of them to reach zero lag and hold it.
+An override with `tree_size_source: get_sth` may replace a catalog-discovered RFC 6962 watcher for the same `log_id`. Other silent protocol switches remain rejected, and the exemption does not work in reverse.
 
-Reported, measured and specified by Effy Elden (@ineffyble) in #14, including the ct-policy thread that established what TrustAsia will and will not serve.
+Overrides now inherit the operator name of the log they replace. `static_logs[].operator` can set the operator for logs not present in a catalog. This keeps operator rate limits grouped correctly.
 
-## `dedup.capacity` now bounds the cache
+Busy tiled logs may also need higher `fetch_concurrency`. Near the head, cache misses can make each tile request take several seconds; four in-flight requests capped one watcher near 50 entries/s. Across the three TrustAsia logs, 16 in flight measured about 276 entries/s, enough for two logs to catch up and remain current.
 
-`capacity` bounded nothing. TTL expiry was the only thing pruning the map, so the steady-state size was ingest rate × TTL: ~420 certs/s × 900 s ≈ 354K entries against a configured 200K. Anyone sizing memory from `capacity` was out by that factor.
+Reported and measured by Effy Elden (@ineffyble) in #14, including the related ct-policy discussion.
 
-`cleanup` now narrows the effective TTL window in proportion to the overshoot, riding along on the sweep that already walks every entry rather than adding work to the insert path (an early version of this evicted inline on every insert and thrashed CPU). Keeping 200K of 354K entries means keeping the newest ~56% of the window. Narrowing it can only let more duplicates through, never fewer, so an over-capacity filter degrades in dedup depth and never in correctness.
+### Dedup capacity is now enforced
 
-`certstream_dedup_effective_ttl_seconds` reports the window actually in force, and `certstream_dedup_capacity_trims` counts sweeps that had to narrow it. Both being quiet means `capacity` is not binding.
+`dedup.capacity` previously did not bound the map; only TTL expiry did. At about 420 certs/s with a 900-second TTL, the steady-state map was roughly 354K entries even when capacity was set to 200K.
 
-## `bytes_sent` counts bytes that were sent
+Cleanup now shortens the effective TTL window when the map exceeds capacity. The adjustment happens during the existing sweep instead of on the insert path. If capacity is binding, deduplication may cover a shorter history, but correctness is unchanged.
 
-`throughput.bytes_sent` summed all three serialized formats per certificate regardless of who was subscribed. Over a two-hour run with one domains-only subscriber it reported 26.8 GB while the container's actual network egress was 555 MB.
+New metrics:
 
-It now counts what goes out to WebSocket and SSE subscribers. The old number moved to `throughput.bytes_serialized`, which is worth watching in its own right: the gap between the two is the cost of serializing formats nobody is subscribed to, which is the signal to disable one via `streams.full` / `streams.lite` / `streams.domains_only`.
+- `certstream_dedup_effective_ttl_seconds`
+- `certstream_dedup_capacity_trims`
 
-Both are also exported as `certstream_bytes_sent_total{protocol}` and `certstream_bytes_serialized_total`. Subscribers accumulate their byte counts locally and flush in batches, so a fan-out to many clients does not turn one broadcast into one atomic write per client.
+### `bytes_sent` now reports transmitted bytes
 
-## CT log lag
+`throughput.bytes_sent` previously counted all three serialized formats for every certificate, whether or not anyone subscribed to them. In a two-hour run with one domains-only subscriber, it reported 26.8 GB while actual container egress was 555 MB.
 
-`certstream_ct_log_lag_entries{log}` reports how far behind each log's head the watcher is. Health status only answers "are requests succeeding", so a log can sit `healthy` while falling further behind on every poll. On a two-hour run 19 of 45 logs were healthy and more than 5K entries behind, one of them by 1.3M. `/api/logs` already carried `current_index` and `tree_size`; this makes the difference alertable.
+It now counts bytes sent to WebSocket and SSE subscribers. The old value is available as `throughput.bytes_serialized`.
 
-## Issuer cache hit rate
+Prometheus exports both:
 
-`certstream_issuer_cache_hits` counted 13 against 487 misses on a two-hour run, which reads as a cache that never hits. The counter sat in `fetch_issuer`, but the tile pre-warm path filters fingerprints through `IssuerCache::get` directly and never reaches `fetch_issuer` on a hit. Both counters moved to the lookup itself. The number of issuers actually fetched over the network is now `certstream_issuer_fetch_attempts`.
+- `certstream_bytes_sent_total{protocol}`
+- `certstream_bytes_serialized_total`
 
-## SSE is opt-in, and the docs now say so
+Subscriber byte counts are accumulated locally and flushed in batches to avoid an atomic write for every client on every broadcast.
 
-`protocols.sse` defaults to `false`, like `protocols.api`, but the README env table, `config.example.yaml` and the docs site all listed it as enabled. Following the README's `docker run` quick start therefore produced a 404 on `/sse` with nothing to explain it; `docker-compose.yml` hid the mismatch by passing `CERTSTREAM_SSE_ENABLED` explicitly.
+### CT log lag metric
 
-The default is unchanged. The documentation was wrong and is now corrected, and a test pins the serde field default so it cannot drift from `ProtocolConfig::default()` unnoticed.
+`certstream_ct_log_lag_entries{log}` reports `tree_size - current_index` per log. This catches logs that remain request-healthy while steadily falling behind.
 
-## Configuration
+In one two-hour run, 19 of 45 logs were healthy but more than 5K entries behind; one was 1.3M entries behind.
+
+### Issuer cache metrics
+
+Issuer cache hit/miss accounting now happens inside `IssuerCache::get`, so tile pre-warm hits are counted correctly. Network fetch attempts are tracked separately as:
+
+```text
+certstream_issuer_fetch_attempts
+```
+
+### SSE documentation
+
+`protocols.sse` still defaults to `false`, matching `protocols.api`. The README, example config, and docs previously listed SSE as enabled. The documentation is corrected and a test now pins the serde field default to `ProtocolConfig::default()`.
+
+### Configuration
 
 | Setting | Old | New |
-| ------- | --: | --: |
-| `static_logs[].tree_size_source` | none | `checkpoint` (new; `get_sth` opts into hybrid tile fetching) |
-| `static_logs[].operator` | none | inherited from the replaced log (new; declare it for logs in no catalog) |
-| `dedup.capacity` | advisory, unenforced | enforced by the cleanup sweep |
+| --- | --- | --- |
+| `static_logs[].tree_size_source` | none | `checkpoint` by default; `get_sth` enables hybrid tile fetching |
+| `static_logs[].operator` | none | Inherited from the replaced log; configurable for uncatalogued logs |
+| `dedup.capacity` | Advisory only | Enforced during cleanup |
 
-## API
+### API
 
-`/api/stats` gains `throughput.bytes_serialized`. `throughput.bytes_sent` keeps its name and changes meaning, as described above.
+`/api/stats` adds `throughput.bytes_serialized`. `throughput.bytes_sent` keeps its name but now reports actual transmitted bytes.
 
-## Tests
+### Tests
 
-269 unit tests (was 262) plus the integration and snapshot suites.
+269 unit tests, up from 262, plus integration and snapshot suites.
 
-## Upgrade
+### Upgrade
 
-Drop-in. No configuration defaults changed.
+Drop-in upgrade. Configuration defaults are unchanged.
 
 ```bash
 docker pull ghcr.io/reloading01/certstream-server-rust:1.5.5
 ```
 
-# Release Notes — v1.5.4
+---
+
+## v1.5.4: Outbound HTTP controls
 
 **Release date:** August 22, 2026
 
-Two outbound-HTTP controls for deployments that hit CT log operator rate limits. No wire-format or API changes.
+Adds two controls for deployments that run into CT operator rate limits. No wire-format or API changes.
 
-## Configurable User-Agent
+### Configurable User-Agent
 
-`ct_log.user_agent` (env `CERTSTREAM_USER_AGENT`) sets the User-Agent on every outbound request — CT log fetches and catalog fetches alike. Some operators (Geomys) apply a more generous rate limit tier to clients that carry a contact address:
+`ct_log.user_agent` (env `CERTSTREAM_USER_AGENT`) sets the User-Agent for CT log and catalog requests. Some operators, including Geomys, provide a more permissive tier when the client includes a contact address.
 
 ```yaml
 ct_log:
   user_agent: "certstream-server-rust (security@example.com)"
 ```
 
-Unset or blank falls back to `certstream-server-rust/{VERSION}`, so `CERTSTREAM_USER_AGENT=` in a compose file or `.env` cannot silently strip the header; a blank value is logged at startup. A value that is not legal HTTP header content fails config validation before the server binds.
+Unset or blank values fall back to `certstream-server-rust/{VERSION}`. A blank environment value is logged, and invalid HTTP header content fails configuration validation before bind.
 
 Contributed by Effy Elden (@ineffyble) in #12.
 
-## Per-operator HTTP/1.1 transport
+### Per-operator HTTP/1.1
 
-DigiCert throttles per TCP connection rather than per IP. Under HTTP/2 reqwest multiplexes every request for a host onto a single connection, so a per-connection quota ends up capping the whole process — and DigiCert serves several logs from one host (`wyvern.ct.digicert.com` negotiates h2), so all of their watchers share it. Listing an operator gives its watchers a dedicated HTTP/1.1 client, where each in-flight fetch needs its own connection and therefore carries its own quota:
+DigiCert applies rate limits per TCP connection rather than per IP. Under HTTP/2, reqwest multiplexes requests for a host over one connection; several DigiCert logs can therefore share a single connection quota.
+
+Operators listed in `force_http1_operators` use a dedicated HTTP/1.1 client so concurrent requests can use separate connections:
 
 ```yaml
 ct_log:
@@ -225,656 +267,377 @@ ct_log:
     - DigiCert
 ```
 
-Env: `CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS=DigiCert,Geomys`.
+Environment form:
 
-This does not raise the outbound request rate. The per-operator token bucket (`default_operator_rate_limit_ms`, 500 ms) still gates every fetch — the same requests are spread across more connections, and `fetch_concurrency` only decides how many of those stay warm in the pool. Operators not listed keep the shared HTTP/2 client.
-
-The observation comes from certspotter's `digicerthack` branch ([SSLMate/certspotter#126](https://github.com/SSLMate/certspotter/issues/126)), which drops keep-alives outright instead.
-
-## Operator name matching
-
-`operator_rate_limits` and `force_http1_operators` are both looked up by canonicalized operator name (case, whitespace and punctuation collapsed). A key matching no discovered log used to be silently inert, which is indistinguishable from a working config until you measure. Startup now names them:
-
+```text
+CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS=DigiCert,Geomys
 ```
+
+This does not increase the configured request rate. The per-operator token bucket still gates every fetch using `default_operator_rate_limit_ms` (500 ms by default). `fetch_concurrency` controls how many connections can remain active.
+
+The behavior was also observed in certspotter's `digicerthack` branch: [SSLMate/certspotter#126](https://github.com/SSLMate/certspotter/issues/126).
+
+### Operator name matching
+
+`operator_rate_limits` and `force_http1_operators` both use canonicalized operator names, with case, whitespace, and punctuation normalized.
+
+Startup now warns when a configured name matches no discovered operator:
+
+```text
 WARN configured operator names match no discovered CT log operator and have no effect field="ct_log.operator_rate_limits" unmatched=["digicert inc"]
 ```
 
-## Configuration
+### Configuration
 
 | Setting | Old | New |
-| ------- | --: | --: |
-| `ct_log.user_agent` | — | `null` (new; env `CERTSTREAM_USER_AGENT`) |
-| `ct_log.force_http1_operators` | — | `[]` (new; env `CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS`) |
+| --- | --- | --- |
+| `ct_log.user_agent` | none | `null` (env `CERTSTREAM_USER_AGENT`) |
+| `ct_log.force_http1_operators` | none | `[]` (env `CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS`) |
 
-## Tests
+### Tests
 
-262 unit tests (was 251) plus the integration and snapshot suites, unchanged.
+262 unit tests, up from 251, plus the existing integration and snapshot suites.
 
-## Upgrade
+### Upgrade
 
-Drop-in — both settings default to the v1.5.3 behaviour.
+Drop-in upgrade. Both settings default to v1.5.3 behavior.
 
 ```bash
 docker pull ghcr.io/reloading01/certstream-server-rust:1.5.4
 ```
 
-# Release Notes — v1.5.3
+---
+
+## v1.5.3: Throughput, memory, and checkpoint verification
 
 **Release date:** July 18, 2026
 
-v1.5.3 is a throughput and memory release, plus one new security feature: static-CT checkpoint signature verification. No wire-format changes — the JSON payloads are byte-identical to v1.5.2 (locked by snapshot tests).
+This release improves ingest throughput and memory behavior and adds static-CT checkpoint signature verification. JSON payloads are byte-identical to v1.5.2, verified by snapshot tests.
 
-## Performance
+### Performance
 
-Measured on the same host, same config, 100 WebSocket clients on the lite stream, against v1.5.2 under identical conditions:
+Measured against v1.5.2 on the same host and configuration with 100 WebSocket clients on the lite stream:
 
-* **~70% higher sustained throughput.** v1.5.2's sequential fetching couldn't keep pace with live CT issuance on the test host; v1.5.3 does, with headroom.
-* **CPU per delivered message roughly halved.** Total CPU is lower even while doing ~1.7× the work.
-* **RSS now tracks live usage.** Catch-up bursts no longer park resident memory at the high-water mark — after a burst, RSS returns to its idle baseline within seconds. Long-running deployments that previously plateaued at several times their live heap should see the difference immediately.
+- Sustained throughput increased by about 70%.
+- CPU per delivered message was roughly halved.
+- RSS returns toward idle baseline after catch-up bursts instead of remaining at the high-water mark.
 
-### What changed
+The main changes are:
 
-**Ingest pipeline.**
+- Fetches are pipelined up to `fetch_concurrency` per watcher, default 4. The per-operator limiter uses a token bucket with the same burst size; sustained request rate is unchanged.
+- RFC 6962 watchers drain the backlog under one STH instead of fetching `get-sth` for every batch.
+- Default `batch_size` increased from 256 to 1024. Watchers adapt to smaller server-side page limits.
+- Base64, X.509 parsing, hashing, and tile decompression run on the blocking pool instead of the async runtime.
+- The issuer cache stores parsed `Arc<ChainCert>` values and negative-caches unparseable issuers.
+- Full DER base64, chain building, and issuer prefetch are skipped when the `full` stream is disabled.
+- Pre-serialized payloads carry the UTF-8 invariant through `Utf8Bytes`, avoiding per-client UTF-8 validation.
+- The dedup map uses ahash for SHA-256 keys instead of SipHash.
+- Auth middleware reads one config snapshot per request instead of cloning the token list repeatedly.
+- jemalloc (`tikv-jemallocator`) is the global allocator on non-MSVC targets.
+- Per-watcher JSON buffers release burst-sized capacity after catch-up.
+- Static-CT leaves are zero-copy `Bytes` slices of the shared tile buffer.
+- The REST cache shares `Arc<Source>`, and domains-only serialization no longer clones the domain list.
 
-* get-entries / tile fetches are now pipelined `fetch_concurrency`-deep per watcher (default 4). The per-operator rate limiter became a token bucket with a burst of the same size, so the **sustained request rate toward log operators is unchanged** — concurrency only hides latency.
-* RFC 6962 watchers drain the whole backlog under one STH instead of re-fetching `get-sth` per batch (the static-CT tile loop already worked this way).
-* Default `batch_size` raised 256 → 1024. Servers clamp to their own maximum (spec-legal); the watcher adapts its window to whatever page size the server actually serves, so pipelined windows stay aligned.
-* All CPU-heavy work — base64, X.509 parsing, hashing, tile decompression — moved off the async runtime onto the blocking pool. Catch-up storms across many watchers no longer starve polling, broadcasting, or health checks.
+### Static-CT checkpoint signature verification
 
-**Per-certificate CPU.**
+Static-CT checkpoints are now verified against the log's ECDSA P-256 key from the signed catalog, using signed-note `TreeHeadSignature` semantics.
 
-* The shared issuer cache stores **parsed** `Arc<ChainCert>`s instead of raw DER. A tile whose 256 leaves chain to the same intermediate now pays one parse instead of 256. Unparseable issuers are negative-cached (fetched at most once).
-* `as_der` (base64 of the full DER), chain building, and issuer prefetching are skipped entirely when the `full` stream is disabled — they have no other consumer.
-* Pre-serialized payloads carry the UTF-8 invariant (`Utf8Bytes`), removing the per-client-per-message UTF-8 scan on both WebSocket and SSE fan-out.
-* The dedup map hashes its SHA-256 keys with ahash instead of SipHash (the key is already uniformly distributed).
-* Auth middleware reads one config snapshot per request instead of cloning the token list up to three times.
+- `ct_log.checkpoint_signature_mode: warn` is the default. Failures are counted and logged but do not block ingest.
+- `enforce` rejects checkpoints whose signature is present but invalid.
+- Checkpoints that cannot be verified because no usable P-256 key is available are accepted in both modes.
+- `static_logs` can provide an optional `key` containing base64 SPKI DER for logs outside the catalog.
+- Environment override: `CERTSTREAM_STATIC_CT_CHECKPOINT_SIGNATURE`.
 
-**Memory.**
+New metrics:
 
-* jemalloc (`tikv-jemallocator`) is the global allocator on non-MSVC targets. The ingest workload churns multi-MB transient buffers across ~100 tasks; system allocators retain those freed pages in arenas, which is exactly the "RSS parked at peak" behavior this replaces.
-* The per-watcher JSON parse buffer hands burst-sized capacity back once a log is caught up instead of retaining its catch-up peak forever — previously the single biggest steady-state RSS contributor.
-* Static-CT tile leaves are zero-copy `Bytes` slices of the shared tile buffer (was: one heap copy per leaf, ~256 allocations per tile).
-* The REST cache shares the message's `Arc<Source>` instead of allocating two `String`s per certificate; `domains_only` serialization no longer clones the domain list.
+- `certstream_static_ct_checkpoint_sig_verified`
+- `certstream_static_ct_checkpoint_sig_failed`
+- `certstream_static_ct_checkpoint_sig_unverifiable`
 
-## Static-CT checkpoint signature verification
+### Shutdown consistency
 
-Checkpoints are now verified against the log's ECDSA P-256 key from the signed catalog (signed-note `TreeHeadSignature`, per c2sp.org/static-ct-api):
+Batch processing and state checkpointing now complete as one detached unit. A shutdown in the middle of a batch can no longer broadcast entries without persisting the corresponding index, which previously caused those entries to be replayed after restart.
 
-* `ct_log.checkpoint_signature_mode: warn` (default) verifies and counts failures but never blocks ingest; `enforce` rejects checkpoints whose signature is present but fails. Checkpoints that *cannot* be verified (no usable P-256 key) are accepted in both modes — inability to verify is not proof of forgery.
-* `static_logs` entries accept an optional `key` (base64 SPKI DER) for logs outside the catalog.
-* Env override: `CERTSTREAM_STATIC_CT_CHECKPOINT_SIGNATURE`.
-
-New metrics: `certstream_static_ct_checkpoint_sig_verified`, `..._sig_failed`, `..._sig_unverifiable`.
-
-## Reliability
-
-**Shutdown atomicity.** Batch processing and the state checkpoint now run as one detached unit: a shutdown arriving mid-batch can no longer broadcast entries without persisting the index, which previously caused those entries to be re-broadcast after a restart.
-
-## Configuration
+### Configuration
 
 | Setting | Old | New |
-| ------- | --: | --: |
+| --- | ---: | ---: |
 | `ct_log.batch_size` | 256 | 1024 |
-| `ct_log.fetch_concurrency` | — | 4 (new, 1-16; env `CERTSTREAM_CT_LOG_FETCH_CONCURRENCY`) |
-| `ct_log.checkpoint_signature_mode` | — | `warn` (new) |
+| `ct_log.fetch_concurrency` | none | 4 (1-16; env `CERTSTREAM_CT_LOG_FETCH_CONCURRENCY`) |
+| `ct_log.checkpoint_signature_mode` | none | `warn` |
 
-Setting `fetch_concurrency: 1` restores the v1.5.2 sequential fetch behavior.
+Set `fetch_concurrency: 1` to restore the v1.5.2 sequential fetch behavior.
 
-## New dependencies
+### Dependencies
 
-`tikv-jemallocator` (global allocator, non-MSVC), `static_ct_api` + `signed_note` + `p256` (checkpoint signature verification).
+Added `tikv-jemallocator`, `static_ct_api`, `signed_note`, and `p256` for allocator and checkpoint verification support.
 
-## Tests
+### Tests
 
-251 unit tests (was 249) plus the integration/snapshot suites. Snapshot tests confirm the serialized JSON output is unchanged.
+251 unit tests, up from 249, plus integration and snapshot suites.
 
-## Upgrade
+### Upgrade
+
+Drop-in upgrade from v1.5.2. New configuration keys are optional.
 
 ```bash
 docker pull ghcr.io/reloading01/certstream-server-rust:1.5.3
 ```
 
-Drop-in upgrade from v1.5.2. Existing configs keep working; the new keys are optional.
-
 ---
 
-# Release Notes — v1.5.2
+## v1.5.2: Verified CT catalog registry
 
 **Release date:** June 16, 2026
 
-v1.5.2 replaces URL-configured CT log discovery with a code-owned, signature-verified catalog registry, and adds the runtime controls to operate it safely.
+CT source discovery now uses a code-owned registry with source verification instead of operator-configured log-list URLs.
 
-## Trusted CT source discovery
+### Trusted CT sources
 
-CT log sources now come from a compile-time registry instead of operator-supplied URLs:
+The built-in registry contains:
 
-* **google_v3_usable** — verified against a pinned RSA-SHA256 trust anchor; authoritative by default.
-* **google_v3_all** — same pinned key; non-authoritative until opted in via `ct_log.catalog_authority_overrides`.
-* **apple** — TLS-authenticated via issuer-CA SPKI pinning (Apple publishes no detached signature); permanently non-authoritative.
+- `google_v3_usable`: verified with a pinned RSA-SHA256 trust anchor and authoritative by default.
+- `google_v3_all`: verified with the same key but non-authoritative unless enabled through `ct_log.catalog_authority_overrides`.
+- `apple`: TLS-authenticated through issuer-CA SPKI pinning. Apple does not publish a detached signature, so this source is permanently non-authoritative.
 
-Trust model: a source that does not verify can never auto-spawn watchers. An authority override can only *grant* authority to a source that currently verifies — it can never promote an unverified source such as Apple. A signature failure forces the source non-authoritative for that cycle while still exposing the raw bytes for audit (`certstream_ct_catalog_source_verified=0`).
+A source that fails verification cannot auto-spawn watchers. Authority overrides only apply to sources that currently verify; they cannot promote an unverified source. On signature failure, a source becomes non-authoritative for that cycle while its raw bytes remain available for audit through `certstream_ct_catalog_source_verified=0`.
 
-## Operational controls
+### Operational controls
 
-* Per-operator outbound rate limits: `ct_log.default_operator_rate_limit_ms` + `ct_log.operator_rate_limits`.
-* Per-log overrides: `batch_size` and `poll_interval_ms` on `custom_logs` / `static_logs`.
-* `expected_log_id` guards configured static-CT overrides against the discovered catalog identity (transport, fetch URL, and an explicitly declared checkpoint origin). The server refuses to start if a configured override contradicts the signed catalog, or if multiple resolved watchers would share a CT log ID.
+- Per-operator outbound rate limits: `ct_log.default_operator_rate_limit_ms` and `ct_log.operator_rate_limits`.
+- Per-log `batch_size` and `poll_interval_ms` overrides on `custom_logs` and `static_logs`.
+- `expected_log_id` validates static-CT overrides against discovered catalog identity, including transport, fetch URL, and an explicitly declared checkpoint origin.
 
-## Breaking change
-
-The `ct_logs_url` and `additional_log_lists` config keys — and the `CERTSTREAM_CT_LOGS_URL` / `CERTSTREAM_ADDITIONAL_LOG_LISTS` env vars — are removed. CT sources are now the code-owned registry. Apple-only or otherwise non-authoritative logs are ingested by declaring them under `static_logs` / `custom_logs`. Existing configs that still set the removed keys are ignored, not rejected.
-
-## New dependencies
-
-`rsa` (catalog signature verification), `rustls` + `rustls-native-certs` (pinned Apple TLS client); `reqwest` gains the `rustls` feature.
-
----
-
-# Release Notes — v1.5.1
-
-**Release date:** June 15, 2026
-
-A small, focused patch release. Two operational improvements, no breaking changes, fully backward-compatible with v1.5.0 configs and Prometheus queries.
-
-## Configurable static-CT tail overlap
-
-Fresh static-CT watchers previously started at a fixed `tree_size - 256`. The overlap is now tunable:
-
-* `ct_log.start_overlap_leaves` (default `256` — existing behavior preserved)
-* env override `CERTSTREAM_CT_LOG_START_OVERLAP_LEAVES`
-* validated with an upper bound of 100,000 leaves
-
-## CT source observability & retry attribution
-
-* new `certstream_ct_runtime_log_info` gauge (`source_id`, `log_id`, `log`, `operator`, `log_type`)
-* existing per-log metrics gain a stable `source_id` label (`ctlog:<log_id>`, or `url:<...>` for id-less sources) alongside the existing human-readable `log` label — old selectors keep working
-* new `certstream_ct_log_rate_limited_total` (labeled by `log_type`) and `certstream_ct_log_empty_responses_total` counters
-* RFC6962 watchers now honor the `Retry-After` header on 429s (clamped to 250 ms–10 min), matching the static-CT path
-
----
-
-# Release Notes — v1.5.0
-
-**Release date:** May 19, 2026
-
-v1.5.0 is focused on one thing: making the server behave like production software under real load.
-
-This release fixes multiple race conditions, removes several failure paths, hardens the networking layer, reduces memory usage, and significantly improves long-term runtime stability.
-
-The old multi-tier rate limiting system has been removed completely. In practice it added complexity without delivering meaningful operational value.
-
-The Rust toolchain is now pinned to **Edition 2024**.
-
-This is a strongly recommended upgrade for all deployments.
-
----
-
-# TL;DR
-
-### Major improvements
-
-* Fixed multiple P0 race conditions and state consistency bugs
-* Eliminated duplicate broadcast edge cases
-* Reduced idle and loaded CPU usage dramatically
-* Lowered default memory footprint by ~22%
-* Added rollback protection for RFC6962 logs
-* Improved WebSocket reliability under slow/stalled clients
-* Hardened gzip parsing and chain parsing logic
-* Removed startup panic paths
-* Shared issuer cache across watchers
-* Added proper idle-server optimization
-* Simplified rate limiting model
+Startup fails if an override contradicts the signed catalog or if multiple resolved watchers would use the same CT log ID.
 
 ### Breaking change
 
-WebSocket messages now use **Text frames** instead of binary frames.
+The following settings are removed:
 
-Most existing clients already support this automatically.
+- `ct_logs_url`
+- `additional_log_lists`
+- `CERTSTREAM_CT_LOGS_URL`
+- `CERTSTREAM_ADDITIONAL_LOG_LISTS`
+
+CT sources now come from the built-in registry. Apple-only or otherwise non-authoritative logs must be declared under `static_logs` or `custom_logs`.
+
+Existing configurations that still contain the removed keys are ignored rather than rejected.
+
+### Dependencies
+
+Added `rsa` for catalog signature verification and `rustls` plus `rustls-native-certs` for the pinned Apple TLS client. `reqwest` now uses its `rustls` feature.
 
 ---
 
-# Performance
+## v1.5.1: Static-CT overlap and source metrics
 
-After tuning and long-duration soak testing:
+**Release date:** June 15, 2026
 
-| Metric     |  Before |   After |
-| ---------- | ------: | ------: |
-| Idle RSS   | 223 MiB | 174 MiB |
+Two operational changes, with no breaking changes for v1.5.0 configuration or existing Prometheus queries.
+
+### Configurable static-CT tail overlap
+
+Fresh static-CT watchers previously started at a fixed `tree_size - 256`. The overlap is now configurable:
+
+- `ct_log.start_overlap_leaves`, default `256`
+- `CERTSTREAM_CT_LOG_START_OVERLAP_LEAVES`
+- Valid range up to 100,000 leaves
+
+### CT source observability and retries
+
+- Added `certstream_ct_runtime_log_info` with `source_id`, `log_id`, `log`, `operator`, and `log_type` labels.
+- Existing per-log metrics now include a stable `source_id` label such as `ctlog:<log_id>` or `url:<...>` while keeping the existing `log` label.
+- Added `certstream_ct_log_rate_limited_total{log_type}` and `certstream_ct_log_empty_responses_total`.
+- RFC 6962 watchers now honor `Retry-After` on HTTP 429 responses, clamped to 250 ms to 10 min, matching the static-CT path.
+
+---
+
+## v1.5.0: Production hardening
+
+**Release date:** May 19, 2026
+
+v1.5.0 focuses on correctness and long-running behavior under load: race fixes, safer shutdown and parsing, lower resource usage, more reliable WebSocket handling, and a simpler rate-limiting model.
+
+The project now targets Rust 2024 Edition.
+
+### Breaking change
+
+WebSocket certificate and heartbeat messages now use text frames instead of binary frames. Clients that only accept binary frames must be updated.
+
+The old Free/Standard/Premium rate-limit tiers are also removed. Authentication now controls access and a single source-IP rate limiter controls throughput.
+
+### Performance
+
+After tuning and soak testing:
+
+| Metric | Before | After |
+| --- | ---: | ---: |
+| Idle RSS | 223 MiB | 174 MiB |
 | Loaded RSS | 253 MiB | 198 MiB |
-| Loaded CPU |     49% |     25% |
+| Loaded CPU | 49% | 25% |
 
-12-hour soak testing results:
+A 12-hour soak test completed with zero panics, restarts, or health-check failures, filtered 38.3M duplicates, and maintained a stable RSS plateau.
 
-* 0 panics
-* 0 restarts
-* 0 healthcheck failures
-* 38.3M duplicates filtered
-* stable RSS plateau
+Compared with `0rickyy0/certstream-server-go` using 100 WebSocket clients:
 
-Compared against the Go implementation (`0rickyy0/certstream-server-go`) with 100 WebSocket clients:
+| Metric | Rust v1.5.0 | Go |
+| --- | ---: | ---: |
+| Avg CPU | 13% | 38% |
+| Peak RSS | 118 MiB | 161 MiB |
+| Memory swing | ±5 MiB | ±66 MiB |
 
-| Metric       | Rust v1.5.0 |      Go |
-| ------------ | ----------: | ------: |
-| Avg CPU      |         13% |     38% |
-| Peak RSS     |     118 MiB | 161 MiB |
-| Memory swing |      ±5 MiB | ±66 MiB |
+### Data integrity
 
-The Rust implementation consistently maintained:
+- **Dedup race:** `DedupFilter::is_new` now uses `DashMap::entry` for atomic check-and-insert. A regression test with 32 threads × 1000 calls confirms one successful insertion.
+- **Dedup cache wipe:** reaching capacity no longer clears the entire map. Expired entries are removed selectively.
+- **State persistence race:** `save_if_dirty` clears the dirty flag with an atomic swap before snapshot generation. Failed saves re-arm persistence.
+- **RFC 6962 rollback protection:** both static-CT and RFC 6962 watchers reject a `tree_size` smaller than the previously observed value. Bounds around `tree_size - 1` are also checked.
+- **Certificate cache eviction:** TTL eviction verifies pointer identity before deleting the API index, preventing stale copies from removing newer entries.
 
-* lower CPU usage
-* tighter memory stability
-* lower peak RSS
-* full static-CT support
+### Reliability
 
----
+- Startup paths no longer depend on `.expect()` for invalid TLS files, occupied ports, or malformed YAML.
+- Configuration validation now runs on normal startup, so invalid values such as `buffer_size: 0` fail before runtime.
+- WebSocket writes have a 10-second timeout; stalled clients are disconnected and counted by `certstream_ws_disconnect_write_timeout`.
+- Clients are disconnected after five consecutive lag events (`lag_policy::MAX_CONSECUTIVE_LAGS`).
+- JSON serialization is skipped when there are no subscribers.
 
-# Data Integrity
+### Memory and resource use
 
-## Dedup race condition fixed
+- Issuer caches are shared across watchers instead of allocated per CT log.
+- Issuer pre-warming is capped at `MAX_INFLIGHT_ISSUER_FETCHES = 16` and skips cached fingerprints.
+- Static-CT tile decompression is capped at `MAX_DECOMPRESSED_TILE_BYTES = 16 MiB`; oversize payloads increment `certstream_static_ct_decompress_oversize`.
 
-`DedupFilter::is_new` previously allowed concurrent inserts for the same SHA-256 hash under load, which could broadcast duplicate certificates.
+### Protocol and security
 
-The implementation now uses `DashMap::entry`, ensuring atomic check-and-insert behavior.
+- WebSocket certificate and heartbeat messages now use `Message::Text`.
+- The zero-copy text path uses `Utf8Bytes::try_from(bytes)` to avoid per-message string allocation.
+- Partial hot reloads no longer reset omitted authentication sections to defaults.
+- Permissive CORS applies only to public WebSocket, SSE, and `/api/cert/{hash}` routes. `/metrics`, `/health`, and `/example.json` are excluded.
+- RFC 6962 chain parsing now rejects bytes beyond the declared chain length.
+- Authentication token comparison remains constant-time through `subtle::ct_eq`.
 
-A regression test with:
+### Runtime defaults
 
-* 32 threads
-* 1000 calls each
+| Setting | Old | New |
+| --- | ---: | ---: |
+| reqwest idle pool | 20 | 4 |
+| dedup capacity | 1M | 200K |
+| API cache | 10K | 1K |
+| tokio worker threads | 8 | 4 |
 
-now guarantees exactly one successful insertion.
+These defaults reduce idle CPU, memory drift, and RSS without changing external behavior.
 
----
+### Dedup hot-path CPU fix
 
-## Dedup cache wipe removed
+`DedupFilter::is_new` previously ran O(n) expiration scans inline after capacity was reached. Expiration now runs only in the periodic cleanup task.
 
-Previously, reaching the 1M-entry dedup capacity triggered a full cache clear.
+Measured before the fix:
 
-That caused immediate duplicate storms.
+| Scenario | CPU |
+| --- | ---: |
+| Idle containers | 211% |
+| Loaded containers | 268% |
 
-The cache now performs targeted expiration instead of catastrophic wipes.
+After the fix:
 
----
+| Scenario | CPU |
+| --- | ---: |
+| Idle containers | 5% |
+| Loaded containers | 16% |
 
-## State persistence race fixed
+### Dependency updates
 
-`save_if_dirty` previously cleared the dirty flag after disk writes, creating a TOCTOU window where updates could be lost.
+- tokio 1.52
+- reqwest 0.13
+- axum-server 0.8
+- simd-json 0.17
+- x509-parser 0.18
+- notify 8
 
-The dirty flag is now cleared before snapshot generation using atomic swap semantics.
-
-Failed saves automatically re-arm persistence.
-
----
-
-## RFC6962 rollback protection added
-
-Rollback protection now exists for both:
-
-* static-CT
-* RFC6962 watchers
-
-Logs returning smaller `tree_size` values than previously observed are now rejected safely.
-
-Additional bounds protection was added around `tree_size - 1`.
-
----
-
-## Certificate cache eviction race fixed
-
-TTL eviction could previously invalidate the API index for newer copies of the same certificate, causing false `404` responses.
-
-Eviction now validates pointer identity before removing index entries.
-
----
-
-# Reliability & Stability
-
-## Startup panics removed
-
-Critical startup paths no longer rely on `.expect()`.
-
-Graceful shutdown handling now covers:
-
-* invalid TLS files
-* occupied ports
-* malformed YAML configs
-
-All failures are logged properly through the cancellation token system.
-
----
-
-## Config validation now runs on normal startup
-
-Invalid configs such as:
-
-```yaml
-buffer_size: 0
-```
-
-previously reached runtime and panicked immediately.
-
-Validation now runs during all startup paths.
-
----
-
-## Slow WebSocket client protection
-
-Outbound WebSocket writes now enforce:
-
-```rust
-WRITE_TIMEOUT = 10s
-```
-
-Stalled clients are disconnected automatically instead of permanently blocking connection tasks.
-
-New metric:
-
-```text
-certstream_ws_disconnect_write_timeout
-```
-
----
-
-## Per-client lag disconnects
-
-Clients that fall behind for 5 consecutive lag events are now disconnected automatically.
-
-Threshold:
-
-```rust
-lag_policy::MAX_CONSECUTIVE_LAGS
-```
-
----
-
-## Idle-server CPU optimization
-
-JSON serialization is now skipped entirely when no subscribers are connected.
-
-This significantly reduces idle CPU usage on ingest-only deployments.
-
----
-
-# Memory & Resource Usage
-
-## Shared issuer cache
-
-Issuer caches are now shared globally across watchers instead of allocating separate caches per CT log.
-
-Benefits:
-
-* lower RAM usage
-* improved issuer reuse
-* faster issuer prewarm behavior
-
----
-
-## Issuer prewarm concurrency capped
-
-Large tiles previously triggered unbounded issuer fetch fan-out.
-
-Prewarm now uses bounded concurrency:
-
-```rust
-MAX_INFLIGHT_ISSUER_FETCHES = 16
-```
-
-and skips already-cached fingerprints.
-
----
-
-## Gzip bomb protection
-
-Tile decompression is now capped at:
-
-```rust
-MAX_DECOMPRESSED_TILE_BYTES = 16 MiB
-```
-
-Oversized payloads are rejected safely.
-
-Metric added:
-
-```text
-certstream_static_ct_decompress_oversize
-```
-
----
-
-# Protocol Changes
-
-## WebSocket frames now use Text
-
-Certificate updates and heartbeat messages now use:
-
-```rust
-Message::Text
-```
-
-instead of binary frames.
-
-Most clients already support this automatically, including:
-
-* browser WebSocket APIs
-* certstream-python
-* standard websocket libraries
-
----
-
-## Zero-copy WebSocket text path
-
-The initial Text-frame migration introduced unnecessary per-message string allocations.
-
-The implementation now uses:
-
-```rust
-Utf8Bytes::try_from(bytes)
-```
-
-allowing shared-buffer reuse without additional allocations.
-
----
-
-# Security & Hardening
-
-## Hot reload authentication bypass fixed
-
-Before v1.5.0, partial hot reload configs could unintentionally disable authentication because omitted sections were replaced with defaults.
-
-Authentication state is now preserved correctly during reloads.
-
-Regression tests added for:
-
-* empty YAML reloads
-* partial config overrides
-
----
-
-## CORS scoping tightened
-
-Permissive CORS headers now apply only to public endpoints:
-
-* WebSocket
-* SSE
-* `/api/cert/{hash}`
-
-Operator-only routes such as:
-
-* `/metrics`
-* `/health`
-* `/example.json`
-
-no longer expose permissive CORS behavior.
-
----
-
-## RFC6962 parser bounds enforced
-
-Certificate chain parsing now strictly respects declared chain lengths.
-
-Trailing bytes beyond the declared length are rejected.
-
----
-
-## Constant-time auth preserved
-
-Authentication token comparison still uses:
-
-```rust
-subtle::ct_eq
-```
-
-to avoid timing attacks.
-
----
-
-# Runtime Tuning
-
-Default settings were tightened after profiling and soak testing.
-
-### Updated defaults
-
-| Setting              | Old |  New |
-| -------------------- | --: | ---: |
-| reqwest idle pool    |  20 |    4 |
-| dedup capacity       |  1M | 200K |
-| API cache            | 10K |   1K |
-| tokio worker threads |   8 |    4 |
-
-These changes reduce:
-
-* idle CPU usage
-* long-term memory drift
-* RSS footprint
-
-while maintaining compatibility.
-
----
-
-# Major CPU Fix
-
-## Dedup hot-path thrash removed
-
-`DedupFilter::is_new` previously triggered inline expiration scans whenever capacity was reached.
-
-Under real-world ingest this caused repeated O(n) scans inside the hot path.
-
-Observed behavior before the fix:
-
-| Scenario          | CPU Usage |
-| ----------------- | --------: |
-| Idle containers   |      211% |
-| Loaded containers |      268% |
-
-Expiration now happens only inside the periodic cleanup task.
-
-Post-fix:
-
-| Scenario          | CPU Usage |
-| ----------------- | --------: |
-| Idle containers   |        5% |
-| Loaded containers |       16% |
-
----
-
-# Dependency Updates
-
-Core stack updated to current stable releases:
-
-* tokio 1.52
-* reqwest 0.13
-* axum-server 0.8
-* simd-json 0.17
-* x509-parser 0.18
-* notify 8
-
-Builder image updated to:
+Builder image:
 
 ```dockerfile
 rust:1.95-alpine
 ```
 
----
+### Removed
 
-# Removed
+The following rate-limit tier features are removed:
 
-The following features no longer exist:
-
-* `RateLimitTier::{Free, Standard, Premium}`
-* tier token tables
-* standard/premium throughput configs
-
-Rate limiting is now unified and based solely on source IP.
-
-Authentication controls access.
-
-Rate limiting controls throughput.
+- `RateLimitTier::{Free, Standard, Premium}`
+- tier token tables
+- standard/premium throughput configuration
 
 Legacy YAML keys still deserialize through compatibility aliases.
 
----
+### Tests
 
-# Testing
+425 tests pass across unit, integration, fuzz, graceful-failure, and soak coverage. No panics were found during fuzzing.
 
-Total test count:
-
-```text
-425 passing tests
-```
-
-Coverage includes:
-
-* unit tests
-* integration tests
-* fuzz targets
-* graceful failure tests
-* soak validation
-
-No panics were found during fuzzing.
-
----
-
-# Upgrade
+### Upgrade
 
 ```bash
 docker pull ghcr.io/reloading01/certstream-server-rust:1.5.0
 ```
 
-## Compatibility Notes
+For v1.4.x deployments:
 
-### For v1.4.x users
+- old standard/premium rate-limit fields are ignored
+- move legacy tier tokens to `auth.tokens`
+- WebSocket clients must accept text frames
 
-* old standard/premium rate-limit fields are ignored
-* move legacy tier tokens into unified `auth.tokens`
-* WebSocket clients must support Text frames instead of binary-only handling
+---
 
-## v1.4.0 — static-ct-api v1.0.0-rc.1 + log-list discovery
+## v1.4.0: static-ct-api v1.0.0-rc.1 and log-list discovery
 
-**May 2, 2026**
+**Release date:** May 2, 2026
 
-Brings the project in line with the post-RFC6962 CT ecosystem: Apple-list discovery for tiled logs, static-ct-api v1.0.0-rc.1 conformance (leaf_index extension, partial-tile width validation, tree-size monotonicity), runtime kill switches per protocol family, and a critical tile-parser bug fix that had silently dropped 99% of static-CT entries since v1.2.
+This release updates static-CT handling to static-ct-api v1.0.0-rc.1, adds Apple tiled-log discovery, introduces per-protocol runtime switches, and fixes a tile-parser bug that caused pre-v1.4 builds to emit only the first entry from each static-CT tile.
 
-### Highlights
+### Tile parser fix
 
-**Tile parser correctness (critical fix).** The `Fingerprint certificate_chain<0..2^16-1>` field is byte-length-prefixed per the static-ct-api framing, not count-prefixed. Pre-1.4 builds treated the prefix as a fingerprint count, consuming subsequent leaves' bytes as chain data — every tile yielded only its first leaf. With the fix, full tiles correctly emit all 256 entries (verified against real Sycamore/Willow/Cloudflare Raio/IPng Networks tiles).
+`Fingerprint certificate_chain<0..2^16-1>` is byte-length-prefixed, not count-prefixed. Earlier versions interpreted the prefix as a fingerprint count and consumed bytes from following leaves as chain data.
 
-**Log-list discovery.** `additional_log_lists` (default: Apple's `current_log_list.json`) is fetched in parallel with Google's v3 list. Both lists' `operators[].tiled_logs[]` arrays are now read and surfaced as static-ct watchers. Logs appearing in multiple lists are deduped by `log_id`. Submission URL drives the checkpoint origin per spec; user-provided `static_logs` entries override discovery for the same URL.
+Full tiles now emit all 256 entries. The fix was verified against Sycamore, Willow, Cloudflare Raio, and IPng Networks tiles.
 
-**static-ct-api v1.0.0-rc.1 conformance:**
-- `leaf_index` SCT extension (type 0, 40-bit BE) parsed from `CtExtensions`; validated against the tile-derived index, mismatches counted via `certstream_static_ct_leaf_index_mismatch`.
-- Partial-tile width enforced: a tile body must contain exactly `floor(s / 256^l) mod 256` leaves for the last tile, 256 for full. Mismatches drop the tile and back off rather than emit partial data (`certstream_static_ct_tile_width_mismatch`).
-- Tree-size monotonicity: rollbacks are detected, logged, and refused (`certstream_static_ct_tree_size_rollbacks`).
-- Witness signatures on checkpoints are passively accepted — extra `— ` lines beyond the primary log signature no longer trip the parser.
+### Log-list discovery
 
-**Runtime kill switches:**
-- `CERTSTREAM_RFC6962_ENABLED=false` (or YAML `ct_log.rfc6962_enabled: false`) skips the legacy watcher pool entirely. Prepares for the 2027 RFC6962 sunset.
-- `CERTSTREAM_STATIC_CT_ENABLED=false` mirrors for static-ct.
-- Refuses to start when both are disabled rather than running with zero sources.
+`additional_log_lists` defaults to Apple's `current_log_list.json` and is fetched alongside Google's v3 list. `operators[].tiled_logs[]` from both sources are exposed as static-CT watchers.
 
-**Type-aware health probes.** Static-CT logs are reachability-probed against `/checkpoint`; RFC6962 logs against `/ct/v1/get-sth`. Static-CT logs no longer get false-negative-filtered out of the candidate pool.
+- Logs are deduplicated by `log_id`.
+- The submission URL determines checkpoint origin.
+- User-defined `static_logs` override discovery for the same URL.
 
-**Per-operator rate limiting for static-CT.** Watchers belonging to the same operator (e.g. all of Cloudflare's Raio shards) now share a 2 req/s limiter, matching the existing RFC6962 behavior. Avoids thundering-herd toward a single CDN host.
+### static-ct-api v1.0.0-rc.1 conformance
 
-**Tunable cross-log dedup.** New `dedup.capacity` / `dedup.ttl_secs` config (env: `CERTSTREAM_DEDUP_CAPACITY` / `CERTSTREAM_DEDUP_TTL_SECS`). Defaults bumped to 1M / 900s to cover the wider RFC6962↔static-CT propagation window.
+- Parses the `leaf_index` SCT extension (type 0, 40-bit big-endian) and validates it against the tile-derived index. Mismatches increment `certstream_static_ct_leaf_index_mismatch`.
+- Enforces partial-tile width: the final tile must contain `floor(s / 256^l) mod 256` leaves, while full tiles contain 256. Invalid widths are rejected and counted by `certstream_static_ct_tile_width_mismatch`.
+- Detects and rejects tree-size rollback through `certstream_static_ct_tree_size_rollbacks`.
+- Accepts additional witness signature lines after the primary checkpoint signature.
+
+### Runtime protocol switches
+
+- `CERTSTREAM_RFC6962_ENABLED=false` or `ct_log.rfc6962_enabled: false` disables the RFC 6962 watcher pool.
+- `CERTSTREAM_STATIC_CT_ENABLED=false` disables static-CT watchers.
+- Startup fails if both protocol families are disabled.
+
+### Health checks and rate limiting
+
+Static-CT logs are probed through `/checkpoint`; RFC 6962 logs use `/ct/v1/get-sth`.
+
+Static-CT watchers from the same operator now share a 2 req/s limiter, matching the existing RFC 6962 behavior.
+
+### Dedup configuration
+
+Added:
+
+- `dedup.capacity`
+- `dedup.ttl_secs`
+- `CERTSTREAM_DEDUP_CAPACITY`
+- `CERTSTREAM_DEDUP_TTL_SECS`
+
+Defaults are 1M entries and 900 seconds to cover the wider RFC 6962/static-CT propagation window.
 
 ### New metrics
 
@@ -882,23 +645,23 @@ Brings the project in line with the post-RFC6962 CT ecosystem: Apple-list discov
 - `certstream_static_ct_tile_width_mismatch{log}`
 - `certstream_static_ct_tree_size_rollbacks{log}`
 
-### Breaking-ish changes
+### Compatibility notes
 
-- `fetch_log_list` (internal) now takes `&[String]` of additional list URLs and returns mixed RFC6962+static-CT logs; downstream binary integrators should re-pin.
-- `dedup` config block is new (defaults backward-compatible).
-- `additional_log_lists` defaults to fetching Apple's list at startup. Set to an empty array (or `CERTSTREAM_ADDITIONAL_LOG_LISTS=`) to opt out.
+- Internal `fetch_log_list` now takes `&[String]` for additional list URLs and returns mixed RFC 6962 and static-CT logs. Downstream binary integrators should re-pin.
+- The `dedup` block is new but optional.
+- `additional_log_lists` now fetches Apple's list by default. Set it to an empty array, or `CERTSTREAM_ADDITIONAL_LOG_LISTS=`, to opt out.
 
-### Test coverage
+### Tests
 
-205 unit tests (was 190 in v1.3.4). New: leaf_index extension parsing, byte-length-prefixed chain fingerprints, Apple-style log-list schema, partial-tile semantics.
+205 unit tests, up from 190 in v1.3.4, covering `leaf_index`, chain fingerprint framing, Apple-style lists, and partial-tile behavior.
 
-### Upgrade notes
+### Upgrade
 
 ```bash
 docker pull ghcr.io/reloading01/certstream-server-rust:1.4.0
 ```
 
-Drop-in upgrade from v1.3.4. Existing config files keep working; `additional_log_lists` and `dedup` blocks are optional. To stay on the v1.3 behavior:
+Existing v1.3.4 configurations remain valid. To retain v1.3-style behavior:
 
 ```yaml
 additional_log_lists: []
@@ -911,16 +674,11 @@ dedup:
 
 ---
 
-## v1.3.4 — Submission Timestamp Support
+## v1.3.4: Submission timestamp support
 
-**April 3, 2026**
+**Release date:** April 3, 2026
 
-Adds the `submission_timestamp` field to all certificate messages — the moment the CT log issued the Signed Certificate Timestamp (SCT) per [RFC 6962 §3.1](https://www.rfc-editor.org/rfc/rfc6962#section-3.1). This complements the existing `seen` field (server-side processing time) and enables consumers to gauge certificate freshness and estimate maximum merge delay.
-
-### New Features
-
-**`submission_timestamp` Field**
-Every certificate message (full, lite) now includes `submission_timestamp`: a Unix timestamp (seconds since epoch, millisecond precision) extracted from the `TimestampedEntry.timestamp` field in the CT log's Merkle tree leaf. Available on both RFC 6962 and static CT log entries.
+Adds `submission_timestamp` to certificate messages. The value is the SCT timestamp from the CT log, as defined in [RFC 6962 §3.1](https://www.rfc-editor.org/rfc/rfc6962#section-3.1), complementing `seen`, which records when this server processed the entry.
 
 ```json
 {
@@ -930,93 +688,90 @@ Every certificate message (full, lite) now includes `submission_timestamp`: a Un
 ```
 
 | Field | Source | Meaning |
-|-------|--------|---------|
+| --- | --- | --- |
 | `seen` | Server clock | When this server processed the entry |
 | `submission_timestamp` | CT log | When the CT log accepted the certificate and issued the SCT |
 
-### Implementation
+The field uses Unix seconds with millisecond precision and is available on full and lite messages for both RFC 6962 and static-CT entries.
 
-- **RFC 6962 path**: Extracted from bytes 2–9 of `leaf_input` (uint64 big-endian milliseconds)
-- **Static CT path**: Extracted from `TileLeaf` timestamp field, renamed from `timestamp` to `submission_timestamp` for clarity
+Implementation details:
 
-### Test Coverage
+- RFC 6962: extracted from bytes 2-9 of `leaf_input` as a big-endian `uint64` millisecond value.
+- Static CT: sourced from the `TileLeaf` timestamp and renamed to `submission_timestamp`.
 
-189 unit tests (no change in count — existing static CT tests updated for field rename).
+### Tests
 
-### Upgrade Notes
+189 unit tests. Existing static-CT tests were updated for the field rename.
 
-- Drop-in upgrade from v1.3.3. No config or state file changes.
-- Additive change — existing WebSocket/SSE consumers will see a new `submission_timestamp` field in JSON payloads; no fields removed.
+### Upgrade
+
+Drop-in upgrade from v1.3.3. There are no config or state-file changes. The JSON change is additive; consumers will see the new field but no existing fields are removed.
 
 ```bash
 docker pull ghcr.io/reloading01/certstream-server-rust:1.3.4
 ```
 
-### Community
-
-Thanks to [@raffysommy](https://github.com/raffysommy) for the contribution ([#5](https://github.com/reloading01/certstream-server-rust/pull/5)).
+Thanks to [@raffysommy](https://github.com/raffysommy) for the contribution in [#5](https://github.com/reloading01/certstream-server-rust/pull/5).
 
 ---
 
-## v1.3.3 — Bandwidth Optimization & Stream Control
+## v1.3.3: Bandwidth and stream controls
 
-**March 13, 2026**
+**Release date:** March 13, 2026
 
-Performance release cutting CT log fetch bandwidth by ~30-50% via HTTP compression, adding per-stream-type on/off config for outbound bandwidth control, switching to Chrome-trusted log list for better coverage with less waste, and deferring chain cert parsing for duplicates.
+This release reduces CT fetch bandwidth through HTTP compression, adds per-stream enable/disable controls, switches the default Google list to Chrome-trusted logs, and avoids parsing certificate chains for duplicate entries.
 
-### New Features
+### Stream controls
 
-**Configurable Stream Types**
-Each stream type (full, lite, domains-only) can be independently enabled or disabled via config or environment variables. Disabled streams skip JSON serialization entirely and their WebSocket/SSE routes are not registered — saving both CPU and outbound bandwidth.
+Each output stream can be enabled independently. Disabled streams are not serialized and their WebSocket/SSE routes are not registered.
 
 ```yaml
 streams:
-  full: false          # Disable full stream (saves ~4-5 KB/cert outbound)
+  full: false
   lite: true
   domains_only: true
 ```
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `CERTSTREAM_STREAM_FULL_ENABLED` | true | Full stream (DER + chain) |
-| `CERTSTREAM_STREAM_LITE_ENABLED` | true | Lite stream (no DER/chain) |
-| `CERTSTREAM_STREAM_DOMAINS_ONLY_ENABLED` | true | Domains-only stream |
+| --- | --- | --- |
+| `CERTSTREAM_STREAM_FULL_ENABLED` | `true` | Full stream, including DER and chain |
+| `CERTSTREAM_STREAM_LITE_ENABLED` | `true` | Lite stream without DER/chain |
+| `CERTSTREAM_STREAM_DOMAINS_ONLY_ENABLED` | `true` | Domains-only stream |
 
-Disabling `full` alone reduces per-cert serialization cost by ~80% and is recommended for bandwidth-constrained deployments.
+Disabling the full stream avoids its DER/chain serialization cost and can reduce per-certificate serialization work by about 80%.
 
-### Performance
+### HTTP compression
 
-**HTTP Compression (gzip + brotli + deflate)**
-Added `gzip`, `brotli`, and `deflate` features to reqwest. CT log servers (Google, Cloudflare, DigiCert, Sectigo) all support compressed responses. Previously, no `Accept-Encoding` header was sent — all JSON responses arrived uncompressed. Expected inbound bandwidth reduction: **~30-50%**.
+reqwest now enables gzip, brotli, and deflate. Previously no `Accept-Encoding` header was sent, so CT JSON responses were uncompressed.
 
-**Deferred Chain Parsing**
-Certificate chain parsing is now deferred until after the dedup filter check. Duplicate certificates (which account for ~60-80% of entries across overlapping CT logs) no longer pay the cost of DER-parsing 2-4 chain certs per entry.
+Measured/expected inbound bandwidth reduction for supporting operators is about 30-50%.
 
-**Chrome-Trusted Log List**
-Default CT log list URL changed from `all_logs_list.json` to `log_list.json` (Chrome-trusted only). This removes ~31 test/staging/legacy logs that wasted bandwidth while adding 16 new production logs from TrustAsia, Geomys, and IPng Networks operators that were missing from the old list.
+### Deferred chain parsing
 
-| Metric | all_logs_list.json | log_list.json |
-|--------|-------------------|---------------|
+Chain certificates are now parsed after the cross-log dedup check. Duplicate entries, estimated at roughly 60-80% across overlapping logs in the tested workload, no longer pay the cost of parsing 2-4 chain certificates.
+
+### Chrome-trusted log list
+
+The default Google list changes from `all_logs_list.json` to `log_list.json`.
+
+| Metric | `all_logs_list.json` | `log_list.json` |
+| --- | ---: | ---: |
 | Active production logs | 24 | 47 |
-| Test/staging (wasted bandwidth) | 19 | 0 |
+| Test/staging logs | 19 | 0 |
 | Duplicate Solera logs | 12 | 0 |
-| New operators | — | TrustAsia, Geomys, IPng Networks |
+| New operators | none | TrustAsia, Geomys, IPng Networks |
 
-### Refactoring
+`LogState` now models the `readonly` field explicitly instead of relying on serde to ignore it.
 
-**`readonly` Log State**
-`LogState` struct now explicitly models the `readonly` state from the CT log list JSON, instead of relying on serde silently ignoring the unknown field.
+### Tests
 
-### Test Coverage
+189 unit tests, including four new stream configuration tests.
 
-189 unit tests (+4 new stream config tests).
+### Upgrade
 
-### Upgrade Notes
+Drop-in upgrade from v1.3.2. The `streams` section is optional and all streams remain enabled by default.
 
-- Drop-in upgrade from v1.3.2. No config or state file changes.
-- New `streams` config section is optional — defaults to all enabled.
-- CT log list URL changed: override with `CERTSTREAM_CT_LOGS_URL` env var if needed.
-- For bandwidth-constrained deployments, set `CERTSTREAM_STREAM_FULL_ENABLED=false`.
+The default log-list URL changes; override it with `CERTSTREAM_CT_LOGS_URL` if needed. For bandwidth-constrained deployments, set `CERTSTREAM_STREAM_FULL_ENABLED=false`.
 
 ```bash
 docker pull ghcr.io/reloading01/certstream-server-rust:1.3.3
@@ -1024,33 +779,31 @@ docker pull ghcr.io/reloading01/certstream-server-rust:1.3.3
 
 ---
 
-## v1.3.2 — Live Connection Count Fix & Public API
+## v1.3.2: Live connection counts and public API docs
 
-**March 9, 2026**
+**Release date:** March 9, 2026
 
-Patch release fixing `/api/stats` always reporting zero active connections, plus public API documentation and live certificate demo on the docs site.
+Fixes `/api/stats` reporting zero active connections and adds public API documentation and a live certificate demo to the docs site.
 
-### Bug Fixes
+### `/api/stats` connection counts
 
-**`/api/stats` Always Reported Zero Connections** *(Bug)*
-`ApiState` held its own `ServerStats` struct with `ws_connections` and `sse_connections` counters that were never incremented anywhere in the codebase. As a result, `GET /api/stats` always returned `{"connections": {"total": 0, "websocket": 0, "sse": 0}}` regardless of actual connected clients.
+`ApiState` previously owned unused `ws_connections` and `sse_connections` counters, so `/api/stats` always returned zero active connections.
 
-Fixed by wiring `ApiState` directly to the real connection sources:
-- Added `ws_state: Arc<websocket::AppState>` to `ApiState` — reads `ConnectionCounter::total()` which is already correctly maintained by WebSocket connect/disconnect handlers.
-- Exposed `pub fn sse_connection_count() -> u64` from `sse.rs` — reads the `SSE_CONNECTION_COUNT` static `AtomicU64` which is already correctly maintained by SSE connect/disconnect handlers.
-- `handle_stats` now computes live counts from these real sources instead of the dead counters.
+The endpoint now reads the actual connection sources:
 
-### Changes
+- `ws_state: Arc<websocket::AppState>` uses `ConnectionCounter::total()`.
+- `sse_connection_count()` reads the `SSE_CONNECTION_COUNT` `AtomicU64`.
+- `handle_stats` calculates totals from those live values.
 
-**Public API Documentation**
-- Added live SSE demo with certificate detail modal to the homepage.
-- Added live active connections counter to the demo terminal (reads `/api/stats` every 30 s).
-- Added Google Analytics (GA4) to all docs pages.
+### Documentation
 
-### Upgrade Notes
+- Added a live SSE certificate demo with detail modal.
+- Added a live active-connection counter that reads `/api/stats` every 30 seconds.
+- Added Google Analytics (GA4) to the docs pages.
 
-- Drop-in upgrade from v1.3.1. No config or state file changes.
-- `/api/stats` now returns correct live connection counts.
+### Upgrade
+
+Drop-in upgrade from v1.3.1. No configuration or state-file changes.
 
 ```bash
 docker pull ghcr.io/reloading01/certstream-server-rust:1.3.2
@@ -1058,27 +811,23 @@ docker pull ghcr.io/reloading01/certstream-server-rust:1.3.2
 
 ---
 
-## v1.3.1 — Static CT Tracker Fix
+## v1.3.1: Static-CT tracker restart fix
 
-**March 8, 2026**
+**Release date:** March 8, 2026
 
-Patch release fixing a bug in the static CT watcher where `/api/logs` showed `current_index: 0, tree_size: 0` for static CT logs that were fully caught up after a server restart.
+Fixes `/api/logs` showing `current_index: 0, tree_size: 0` for static-CT logs that were already caught up when the server restarted.
 
-### Bug Fixes
+When `current_index == tree_size` at startup, the poll loop skipped tile processing and never called `tracker.update()`. The tracker is now updated with the current checkpoint values before the watcher sleeps.
 
-**Static CT Tracker Zero After Restart** *(Bug)*
-When a static CT log's `current_index` equalled `tree_size` on startup (i.e. the log was fully caught up from saved state), the main poll loop skipped the tile-processing path entirely and never called `tracker.update()`. As a result, `/api/logs` reported `current_index: 0, tree_size: 0` for those logs until new entries arrived and a tile was actually fetched. Fixed by calling `tracker.update()` with the current checkpoint values before sleeping when no new tiles are available.
+This mainly affected closed-period static-CT logs, including Let's Encrypt Willow/Sycamore 2025h2d, because no new entries arrived to refresh the tracker later.
 
-Affected logs: any static CT log that is fully caught up on startup — most visibly Let's Encrypt 2025h2d logs (Willow/Sycamore) which are closed-period logs with no new entries.
+### Tests
 
-### Test Coverage
+185 unit tests. The test count is unchanged because the bug was in runtime control flow.
 
-185 unit tests (no change — bug was in runtime control flow, not a missing test case).
+### Upgrade
 
-### Upgrade Notes
-
-- Drop-in upgrade from v1.3.0. No config or state file changes.
-- `/api/logs` now correctly reflects static CT log positions immediately after restart.
+Drop-in upgrade from v1.3.0. No configuration or state-file changes.
 
 ```bash
 docker pull ghcr.io/reloading01/certstream-server-rust:1.3.1
@@ -1086,105 +835,57 @@ docker pull ghcr.io/reloading01/certstream-server-rust:1.3.1
 
 ---
 
-## v1.3.0 — Zero-Copy & Performance Update
+## v1.3.0: Zero-copy pipeline and correctness fixes
 
-**February 22, 2026**
+**Release date:** February 22, 2026
 
-Performance-focused release eliminating hot-path heap allocations through a "serialize-once, broadcast-many" zero-copy pipeline, lock-free concurrency throughout, and SIMD-accelerated JSON enabled by default — while hardening state persistence, fixing critical correctness bugs, and ensuring monitoring endpoints are always reachable.
+This release reduces hot-path allocation, enables SIMD JSON by default, hardens state persistence, and fixes several correctness and shutdown bugs.
 
-### Performance
+### Performance and allocation
 
-**Zero-Copy Serialize-Once Pipeline**
-`CertificateMessage::pre_serialize()` wraps three pre-built `Bytes` payloads (`full`, `lite`, `domains_only`) in an `Arc<PreSerializedMessage>`. Each broadcast subscriber receives only an Arc pointer clone — a single atomic increment — regardless of the number of connected clients. With 10,000 clients, serialization cost is O(1) instead of O(n).
+- `CertificateMessage::pre_serialize()` builds `full`, `lite`, and `domains_only` `Bytes` payloads once and shares them through `Arc<PreSerializedMessage>`.
+- `CertificateData.leaf_cert` is now `Arc<LeafCert>` so output formats share one leaf-certificate allocation.
+- Dedup keys use raw `[u8; 32]` SHA-256 digests instead of heap-allocated 64-byte hex strings.
+- `LeafCert::fingerprint` uses `Arc<str>` and shares storage with `sha1`.
+- Static values such as `signature_algorithm` and `message_type` use `Cow<'static, str>`.
+- `simd-json` is now a default Cargo feature. Use `--no-default-features` to fall back to `serde_json`.
 
-**`Arc<LeafCert>` — Shared Leaf Certificate**
-`CertificateData.leaf_cert` is now `Arc<LeafCert>`. Broadcasting the same certificate across the full, lite, and domains-only channels no longer copies the leaf cert struct — all three serialization paths reference the same heap allocation.
+Under a sustained ingest rate of about 1,000 certs/s, measured RSS stayed around 150 MB without long-term growth.
 
-**Zero-Allocation Dedup Key**
-The dedup filter key changed from a hex-encoded `String` (`format!("{:02x}", ...)` × 32) to a raw `[u8; 32]` fixed-size array stored directly in `LeafCert::sha256_raw`. This eliminates one heap allocation per certificate on every dedup lookup — on both hit and miss. The raw digest flows from `x509-parser` to `DedupFilter::is_new()` with no intermediate encoding step.
+### Correctness and reliability
 
-**`Arc<str>` Fingerprint & `Cow<'static, str>` for Static Strings**
-`LeafCert::fingerprint` is now `Arc<str>`, shared with the `sha1` field — no duplicate heap allocation for the fingerprint string. `signature_algorithm` and `message_type` use `Cow<'static, str>`, eliminating allocations for common static values.
+- **RFC 6962 partial responses:** `current_index` now advances by the number of entries actually received rather than the requested batch size, preventing skipped ranges.
+- **SIGTERM/SIGINT registration:** signal streams are registered before entering `select!`, preventing a fast shutdown signal from being lost. Signal registration failure now cancels the shutdown token.
+- **State durability:** state temp files are `fsync()`ed before atomic rename through `write_and_sync()`.
+- **Health endpoints:** `/health`, `/health/deep`, `/metrics`, and `/example.json` bypass auth and rate limiting so probes and Prometheus scraping continue to work.
+- **WebSocket heartbeat type:** heartbeat frames now use the same binary frame type as certificate messages in this release.
+- **Initial STH failure:** RFC 6962 watchers exit instead of silently starting from index 0.
+- **Missing `ctlPoisonByte`:** chain certificates now deserialize missing values as `false` through `#[serde(default)]`.
+- **`LogHealth` consistency:** circuit-breaker state moved under one `Mutex<LogHealthInner>` to prevent torn reads.
+- **Degraded threshold:** the half-threshold is clamped to at least 1 for low sample counts.
+- **Hot reload path env:** `CERTSTREAM_HOT_RELOAD_WATCH_PATH` is now parsed correctly.
+- **Shutdown rename race:** `ENOENT` from a concurrent temp-file rename is treated as benign.
+- **Prometheus startup values:** key counters are initialized to zero so `rate()` and `increase()` do not return `NaN` before the first event.
+- **404 responses:** missing routes now return `{"error": "not found"}`.
+- **Empty batches:** RFC 6962 and static-CT watchers do not advance on empty response batches.
 
-**SIMD JSON Enabled by Default**
-`simd-json` is now a default Cargo feature. `cargo build --release` produces SIMD-accelerated JSON serialization without any explicit `--features` flag. Use `--no-default-features` to revert to `serde_json`.
-
-**Result**: Flat ~150 MB RSS under sustained load (~1,000 cert/s ingest rate). Memory footprint is stable and does not grow over time.
-
-### Bug Fixes
-
-**RFC 6962 Partial Response Gap** *(Critical)*
-When a CT log returned fewer entries than the requested batch size (common on Google Argon), `current_index` was advanced by the requested batch size rather than the actual number of entries received. This silently skipped certificate ranges on every partial response. Fixed to advance by `entries.len()`.
-
-**SIGTERM/SIGINT TOCTOU Race** *(Critical)*
-The signal handler stream was registered inside the `select!` block. A signal arriving between process entry and the first `select!` poll was silently discarded, causing the server to hang instead of shutting down gracefully. Signal stream registration now happens before entering `select!`. Shutdown token is cancelled on signal registration failure instead of hanging.
-
-**State Persistence — fsync Before Rename**
-`save_if_dirty()` wrote state to a `.tmp` file then renamed it atomically. On ext4/xfs with ordered journaling, the OS could reorder the rename before the write's data pages were flushed, producing a zero-byte state file after a hard crash. A new `write_and_sync()` helper calls `fsync()` on the temp file descriptor before `rename()`.
-
-**Auth/Rate-Limit Blocking Health Endpoints** *(Critical)*
-When authentication or rate limiting was enabled, `/health`, `/health/deep`, `/metrics`, and `/example.json` were intercepted by middleware and returned 401/429 — breaking Kubernetes liveness/readiness probes and Prometheus scraping. These endpoints are now explicitly exempted from all auth and rate-limit layers.
-
-**WebSocket Heartbeat Frame Type**
-Keepalive heartbeat frames were sent as `Text` frames while certificate messages use `Binary` frames. Strict WebSocket clients rejected heartbeats as unexpected frame types. Heartbeats are now sent as `Binary` frames, consistent with the rest of the protocol.
-
-**RFC 6962 Watcher Silent Start from Index 0**
-If the initial STH fetch failed, the watcher silently started processing from index 0 instead of exiting, causing the entire log history to be re-processed on transient startup errors. The watcher now exits immediately on initial STH fetch failure.
-
-**`ctlPoisonByte` Deserialization Failure on Chain Certs**
-Chain certificates missing the `ctlPoisonByte` field caused a serde deserialization error, dropping the entire chain. Added `#[serde(default)]` so missing field deserializes to `false`.
-
-**`LogHealth` Torn Reads**
-`LogHealth` tracked circuit-breaker state across multiple independently-locked atomics and `RwLock` fields. Concurrent readers could observe partially-updated state (e.g., a reset failure count with a stale health status). All fields are now consolidated under a single `Mutex<LogHealthInner>`.
-
-**Degraded Threshold Division Edge Case**
-When a log had fewer than 2 recent attempts, integer division produced `half_threshold = 0`, making every single failure immediately trip the degraded state. The threshold is now clamped to a minimum of 1.
-
-**`CERTSTREAM_HOT_RELOAD_WATCH_PATH` Not Parsed**
-`CERTSTREAM_HOT_RELOAD_WATCH_PATH` was documented in the README and config reference but the environment variable was never read in `config.rs`. Fixed.
-
-**Spurious ERROR Log on Shutdown**
-Concurrent `save_if_dirty()` calls during graceful shutdown could race on the `.tmp` file rename, producing a spurious `ENOENT` `ERROR` log. `ENOENT` on rename is now treated as benign — another concurrent call completed the rename first.
-
-**Prometheus Counters Not Initialized at Startup**
-Key counters had no initial value, causing `rate()` and `increase()` Prometheus queries to return `NaN` until the first event fired. Counters are now explicitly set to 0 at startup.
-
-**JSON Body on 404 Responses**
-404 responses returned an empty body. Now return `{"error": "not found"}` for consistency with other error responses.
-
-### Refactoring
-
-**`LogHealth` Consolidated Under Single Mutex**
-Replaced multiple atomic and `RwLock` fields with a single `Mutex<LogHealthInner>`, eliminating inconsistent lock-ordering requirements and ensuring all health state transitions are atomic from the perspective of any reader.
-
-**Empty Entry Batch Guard**
-Both RFC 6962 and static CT watchers now guard against empty response batches before advancing the current index, preventing accidental progress past the real tree tip.
-
-**`write_and_sync()` Helper**
-Extracted fsync + atomic rename into a dedicated helper used by all state persistence code paths.
-
-### Configuration Changes
-
-`CERTSTREAM_HOT_RELOAD_WATCH_PATH` environment variable now correctly overrides the config file watch path (was documented but not implemented in previous releases).
-
-### Benchmarks (vs v1.2.0)
+### Benchmarks vs v1.2.0
 
 | Metric | v1.2.0 | v1.3.0 |
-|--------|--------|--------|
-| Memory (under load, stable) | ~198 MB | ~150 MB |
-| Heap allocs per certificate (hot path) | ~6 | ~3 |
-| Dedup key allocation | 1 `String` (hex, 64 B heap) | 0 (32 B stack array) |
-| SIMD JSON | opt-in (`--features simd`) | on by default |
-| Certs skipped on partial CT response | Yes (Google Argon affected) | No |
-| Health/metrics endpoints behind auth | Yes | No (always exempt) |
-| SIGTERM drop on fast shutdown | Possible | Fixed |
+| --- | --- | --- |
+| Memory under load | ~198 MB | ~150 MB |
+| Hot-path heap allocations per certificate | ~6 | ~3 |
+| Dedup key allocation | 1 heap `String` | 0; 32-byte stack array |
+| SIMD JSON | Opt-in | Default |
+| Partial-response certificate skips | Possible | Fixed |
+| Health/metrics behind auth | Yes | No |
+| Fast SIGTERM loss | Possible | Fixed |
 
-### Upgrade Notes
+### Upgrade
 
-- No breaking changes. Drop-in upgrade from v1.2.0.
-- SIMD JSON is now on by default — no `--features simd` flag needed for source builds.
-- `/health`, `/health/deep`, `/metrics`, and `/example.json` are now always accessible regardless of authentication configuration.
-- State files written by v1.2.0 are fully compatible — no migration required.
+Drop-in upgrade from v1.2.0. Existing state files remain compatible.
+
+SIMD JSON no longer requires `--features simd`, and monitoring endpoints are always reachable regardless of authentication settings.
 
 ```bash
 docker pull ghcr.io/reloading01/certstream-server-rust:1.3.0
@@ -1192,119 +893,116 @@ docker pull ghcr.io/reloading01/certstream-server-rust:1.3.0
 
 ---
 
-## v1.2.0 — Static CT Log Support, Stability & Performance Overhaul
+## v1.2.0: Static CT support and stability overhaul
 
-**February 6, 2026**
+**Release date:** February 6, 2026
 
-Major release adding static CT protocol (RFC 6962-bis) support, cross-log certificate deduplication, full CT log coverage, and significant stability/performance improvements — preparing for Let's Encrypt's RFC 6962 shutdown on February 28, 2026.
+Adds static-CT support, cross-log certificate deduplication, broader log coverage, graceful worker recovery, and a monitoring stack. It also removes the legacy TCP output protocol.
 
-### Breaking Changes
+### Breaking change
 
-- **TCP protocol removed.** Switch to WebSocket (`ws://host:8080/`) or SSE (`http://host:8080/sse`). Related env vars `CERTSTREAM_TCP_ENABLED` and `CERTSTREAM_TCP_PORT` have been removed.
+TCP output is removed. Use WebSocket (`ws://host:8080/`) or SSE (`http://host:8080/sse`).
 
-### New Features
+The following environment variables are removed:
 
-**Static CT Log Protocol (Sunlight / static-ct-api)**
-Full support for the checkpoint + tile-based static CT API per [c2sp.org/static-ct-api](https://c2sp.org/static-ct-api). Includes binary tile parsing (x509/precert), hierarchical tile path encoding, gzip decompression, and issuer certificate fetching with DashMap-based caching. Four Let's Encrypt Sunlight logs are configured by default (Willow/Sycamore 2025h2d/2026h1).
+- `CERTSTREAM_TCP_ENABLED`
+- `CERTSTREAM_TCP_PORT`
 
-**Cross-Log Certificate Deduplication**
-SHA-256 based dedup filter prevents duplicate broadcasts when the same certificate appears across multiple CT logs. Configured with a 5-minute TTL, 60-second cleanup interval, and 500K entry capacity (~50 MB max). Runs as a background task with graceful cancellation — always active, no configuration needed.
+### Static CT support
 
-**Full CT Log Coverage**
-Now monitors all CT logs except rejected/retired (previously only "usable"). Adds Google Solera logs (2018–2027) and readonly logs. 63 candidates → 49 reachable.
+The server now supports checkpoint- and tile-based static CT according to [c2sp.org/static-ct-api](https://c2sp.org/static-ct-api), including:
 
-**Startup Health Check**
-Parallel health checks filter unreachable logs on startup with a 5-second timeout, preventing warning spam from defunct logs. Workers start with 50 ms staggered intervals to reduce rate limiting.
+- x509/precert tile parsing
+- hierarchical tile paths
+- gzip decompression
+- issuer certificate fetching with a DashMap-backed cache
 
-**Circuit Breaker Pattern**
-Handles unreliable CT logs gracefully: Closed (normal) → Open (30 s block) → HalfOpen (testing). Paired with exponential backoff (1 s min → 60 s max).
+Four Let's Encrypt Sunlight logs are configured by default: Willow and Sycamore for 2025h2d and 2026h1.
 
-**Graceful Shutdown**
-`CancellationToken` for coordinated worker termination on SIGINT/SIGTERM. Workers complete current work before stopping.
+### Cross-log deduplication
 
-**Deep Health Endpoint**
-`GET /health/deep` returns per-log health status with connection count and uptime. Returns HTTP 503 when >50% of logs are failing.
+A SHA-256 dedup filter prevents the same certificate from being broadcast repeatedly when it appears in multiple CT logs.
 
-**New Prometheus Metrics**
+Initial defaults in this release:
+
+- TTL: 5 minutes
+- cleanup interval: 60 seconds
+- capacity: 500K entries, approximately 50 MB
+
+The filter runs as a background task and shuts down through the shared cancellation token.
+
+### CT log coverage and health
+
+- Monitors all logs except rejected/retired, rather than only `usable` logs.
+- Adds Google Solera and readonly logs.
+- Startup health checks run in parallel with a 5-second timeout; 63 candidates produced 49 reachable logs in the tested set.
+- Worker startup is staggered by 50 ms to reduce rate-limit bursts.
+- Per-log circuit breakers use Closed → Open → HalfOpen transitions with 30-second open state and exponential backoff from 1 to 60 seconds.
+- `CancellationToken` coordinates SIGINT/SIGTERM shutdown.
+- `GET /health/deep` reports per-log health, connection count, and uptime, and returns HTTP 503 when more than half of logs are failing.
+
+### Prometheus metrics
 
 | Metric | Type | Description |
-|--------|------|-------------|
+| --- | --- | --- |
 | `certstream_static_ct_logs_count` | Gauge | Static CT logs monitored |
-| `certstream_static_ct_tiles_fetched` | Counter | Tiles fetched from static CT logs |
-| `certstream_static_ct_entries_parsed` | Counter | Entries parsed from static CT tiles |
-| `certstream_static_ct_parse_failures` | Counter | Failed static CT entry parses |
+| `certstream_static_ct_tiles_fetched` | Counter | Static CT tiles fetched |
+| `certstream_static_ct_entries_parsed` | Counter | Static CT entries parsed |
+| `certstream_static_ct_parse_failures` | Counter | Static CT parse failures |
 | `certstream_static_ct_checkpoint_errors` | Counter | Checkpoint fetch/parse errors |
 | `certstream_issuer_cache_size` | Gauge | Cached issuer certificates |
 | `certstream_issuer_cache_hits` | Counter | Issuer cache hits |
 | `certstream_issuer_cache_misses` | Counter | Issuer cache misses |
-| `certstream_duplicates_filtered` | Counter | Certificates filtered by dedup |
+| `certstream_duplicates_filtered` | Counter | Duplicate certificates filtered |
 | `certstream_dedup_cache_size` | Gauge | Current dedup cache size |
-| `certstream_worker_panics` | Counter | Worker panics (auto-recovered) |
+| `certstream_worker_panics` | Counter | Worker panics recovered |
 | `certstream_log_health_checks_failed` | Counter | Failed log health checks |
 
-Per-log metrics (`certstream_messages_sent`, `certstream_parse_failures`, and all `static_ct_*` counters) now include a `log` label for per-source breakdown in Grafana.
+Per-log metrics such as `certstream_messages_sent`, `certstream_parse_failures`, and static-CT counters now include a `log` label.
 
-**Grafana Dashboard & Monitoring Stack**
-Pre-built Grafana dashboard with per-source certificate volume, dedup efficiency, and static CT panels. Prometheus + Grafana run behind Docker Compose's `monitoring` profile and are not started by default:
+### Grafana and Prometheus
+
+A Grafana dashboard is included for source volume, dedup efficiency, and static-CT metrics. Prometheus and Grafana are behind the Docker Compose `monitoring` profile and are not started by default.
 
 ```bash
 # Server only
 docker compose up -d
 
-# With monitoring
+# Server + monitoring
 docker compose --profile monitoring up -d
 ```
 
-Default Grafana credentials: `admin` / `certstream` (configurable via `GRAFANA_USER` / `GRAFANA_PASSWORD`).
+Default Grafana credentials are `admin` / `certstream` and can be changed through `GRAFANA_USER` and `GRAFANA_PASSWORD`.
 
-### Bug Fixes
+### Bug fixes
 
-**State Persistence — AtomicBool Dirty Flag** *(Critical)*
-`update_index()` used `try_write()` on a tokio `RwLock<bool>`, which silently failed when `save_if_dirty()` held a read lock, causing lost state updates. Replaced with `AtomicBool` using `Ordering::Relaxed`.
-
-**State Persistence — Shutdown Flush** *(Critical)*
-`save_if_dirty()` was never called on SIGINT/SIGTERM, losing up to 30 seconds of progress on every restart. Now flushes state after the HTTP server stops.
-
-**State Persistence — Periodic Save Never Stops**
-`start_periodic_save()` spawned an infinite loop with no cancellation mechanism. Now accepts a `CancellationToken` and flushes state before exiting.
-
-**State Persistence — Default State File**
-`state_file` defaulted to `null`, silently disabling persistence. Changed default to `"certstream_state.json"`.
-
-**Subject/Issuer Parsing Always Null** *(Critical)*
-All certificates had `null` subject/issuer fields because `as_str()` only handled UTF8String ASN.1 encoding. Real-world certificates use PrintableString, IA5String, and others. Added a raw byte fallback for ASCII-compatible encodings.
-
-**Config Environment Variable Override Ignored**
-Env vars for a config section were silently ignored when that YAML section existed. Env var overrides now always apply on top of YAML values.
-
-**Inconsistent Subject/Issuer JSON Serialization**
-Stream endpoints serialized empty fields as `null` while the cert lookup API omitted them. Added `skip_serializing_if = "Option::is_none"` for consistent omission of empty fields.
-
-**HTTP Status Check Before JSON Parse** *(Critical)*
-CT logs (especially DigiCert) returning 400/429/5xx caused continuous JSON parse errors, CPU strain, and log spam. Non-2xx responses are now logged as warnings with proper status codes.
-
-**Worker Panic Recovery**
-Worker threads silently died on panic, leaving CT logs unmonitored. Implemented `catch_unwind` with automatic restart after 5-second delay.
-
-**WebSocket Ping Priority**
-Ping/pong had lowest priority in `tokio::select!`, causing client timeouts. Reordered with `biased;`.
+- **Dirty state updates:** `update_index()` now uses `AtomicBool` instead of `try_write()` on a tokio `RwLock<bool>`, preventing lost dirty-state updates.
+- **Shutdown state flush:** state is saved after the HTTP server stops, avoiding up to 30 seconds of lost progress.
+- **Periodic save shutdown:** the periodic save task now accepts a `CancellationToken` and flushes before exit.
+- **Default state file:** `state_file` now defaults to `"certstream_state.json"` instead of `null`.
+- **Subject/issuer parsing:** non-UTF8String ASN.1 encodings now fall back to raw ASCII-compatible bytes instead of producing `null`.
+- **Environment overrides:** environment values now apply on top of YAML even when the YAML section already exists.
+- **JSON consistency:** absent subject/issuer fields are omitted consistently through `skip_serializing_if = "Option::is_none"`.
+- **HTTP status handling:** non-2xx CT responses are handled before JSON parsing, reducing parse-error loops on 400/429/5xx responses.
+- **Worker panic recovery:** watcher panics are caught and restarted after five seconds.
+- **WebSocket ping priority:** ping/pong handling gets priority through `biased;` in `tokio::select!`.
 
 ### Performance
 
-- **O(1) certificate cache lookup** — DashMap with pre-normalized hash keys replaces linear scan (~100× faster).
-- **O(1) domain deduplication** — HashSet replaces O(n²) `contains()` scans (~10× faster for large SAN lists).
-- **Pre-allocated serialization buffers** — 4 KB (full), 2 KB (lite), 512 B (domains-only).
-- **Staggered worker start** — 50 ms intervals between worker launches reduces DigiCert 429 errors by ~60%.
-- **Optional SIMD JSON** — enable with `cargo build --release --features simd`.
-- **Optimized release profile** — `opt-level = 3`, LTO, single codegen unit, symbol stripping.
+- O(1) certificate cache lookup using DashMap and normalized hash keys.
+- O(1) domain deduplication using HashSet instead of repeated linear `contains()` scans.
+- Preallocated serialization buffers: 4 KB full, 2 KB lite, 512 B domains-only.
+- 50 ms staggered worker startup reduced DigiCert 429 responses by about 60% in testing.
+- Optional SIMD JSON through `cargo build --release --features simd`.
+- Release profile uses `opt-level = 3`, LTO, one codegen unit, and symbol stripping.
 
 ### Docker
 
-Native health check via `HEALTHCHECK` directive and `docker-compose.yml` healthcheck config against `/health/deep`.
+The image and Compose setup now include a native health check against `/health/deep`.
 
-### Configuration Changes
+### Configuration
 
-New `static_logs` section:
+Static CT logs can be configured with:
 
 ```yaml
 static_logs:
@@ -1318,35 +1016,46 @@ static_logs:
     url: "https://mon.sycamore.ct.letsencrypt.org/2025h2d/"
 ```
 
-Default `state_file` changed from `null` → `"certstream_state.json"`.
+Default `state_file` changes from `null` to `"certstream_state.json"`.
 
-### Test Coverage
+### Tests
 
-183 unit tests across all modules: `static_ct` (30), `parser` (27), `config` (18), `api` (18), `middleware` (14), `rate_limit` (13), `log_list` (13), `state` (12), `certificate` (11), `watcher` (11), `dedup` (10), `hot_reload` (6).
+183 unit tests across the codebase:
 
-### Dependencies
+- `static_ct` 30
+- `parser` 27
+- `config` 18
+- `api` 18
+- `middleware` 14
+- `rate_limit` 13
+- `log_list` 13
+- `state` 12
+- `certificate` 11
+- `watcher` 11
+- `dedup` 10
+- `hot_reload` 6
 
 Added `flate2 = "1.0"` for gzip tile decompression.
 
-### Benchmarks (vs v1.1.0)
+### Benchmarks vs v1.1.0
 
 | Metric | v1.1.0 | v1.2.0 |
-|--------|--------|--------|
+| --- | --- | --- |
 | Parse errors | Continuous | 0 |
 | Healthy logs | Variable | 49/49 |
 | Throughput | ~200 cert/s | ~400 cert/s |
 | Client disconnections | Frequent | Rare |
 | Recovery | Manual | Automatic |
 
-### Upgrade Notes
+### Upgrade
 
-- TCP protocol removed — switch to WebSocket or SSE
-- Subject/issuer fields now populate correctly for all certificate encodings
-- Environment variables now always override YAML config
-- State persistence enabled by default
-- Cross-log dedup is always active (no config required)
-- Static CT logs require explicit `static_logs` entries for non-Let's Encrypt logs
-- Monitoring is opt-in via `docker compose --profile monitoring up -d`
+- Switch TCP clients to WebSocket or SSE.
+- Subject/issuer fields now populate across supported certificate encodings.
+- Environment variables now override YAML consistently.
+- State persistence is enabled by default.
+- Cross-log deduplication is always active.
+- Non-Let's Encrypt static-CT logs require explicit `static_logs` entries.
+- Monitoring remains opt-in through the Compose `monitoring` profile.
 
 ```bash
 docker pull ghcr.io/reloading01/certstream-server-rust:1.2.0
