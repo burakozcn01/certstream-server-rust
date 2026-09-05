@@ -28,6 +28,13 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # `contents: write` for the "Ensure release exists" step below, which
+    # creates the release the upload jobs then attach assets to. The workflow
+    # default stays `read`; the jobs that write to a release ask for it, as
+    # `binaries` and `packages` already do.
+    permissions:
+      contents: write
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
