@@ -39,7 +39,21 @@ impl ConnectionLimiter {
             .unwrap_or_else(|| self.fallback_config.clone())
     }
 
-    pub fn try_acquire(&self, ip: IpAddr) -> bool {
+    /// Take a slot and get back a handle that returns it on drop.
+    ///
+    /// The WebSocket handlers must acquire *before* `ws.on_upgrade`, but axum
+    /// drops the upgrade callback without ever calling it when the handshake
+    /// fails, so a slot released at the end of the connection task leaks on
+    /// every failed upgrade. Moving this guard into the callback makes the
+    /// release follow the callback's lifetime instead of its execution.
+    pub fn acquire(self: &Arc<Self>, ip: IpAddr) -> Option<ConnectionGuard> {
+        self.try_acquire(ip).then(|| ConnectionGuard {
+            limiter: Arc::clone(self),
+            ip,
+        })
+    }
+
+    fn try_acquire(&self, ip: IpAddr) -> bool {
         let config = self.get_config();
 
         if !config.enabled {
@@ -47,7 +61,8 @@ impl ConnectionLimiter {
         }
 
         loop {
-            // L-7 fix: use Acquire for the load in the CAS loop
+            // Acquire: the CAS below is only sound if this load cannot be
+            // reordered past it.
             let current_total = self.total_connections.load(Ordering::Acquire);
             if current_total >= config.max_connections {
                 metrics::counter!("certstream_connection_limit_rejected").increment(1);
@@ -74,7 +89,6 @@ impl ConnectionLimiter {
                 }
             }
             if should_release {
-                // C-1 fix: use saturating_sub to prevent u32 underflow
                 self.total_connections.fetch_update(
                     Ordering::AcqRel,
                     Ordering::Acquire,
@@ -93,16 +107,16 @@ impl ConnectionLimiter {
         true
     }
 
-    pub fn release(&self, ip: IpAddr) {
+    fn release(&self, ip: IpAddr) {
         let config = self.get_config();
 
         if !config.enabled {
             return;
         }
 
-        // C-1 fix: use fetch_update with saturating_sub to prevent u32 underflow
-        // if `enabled` flipped false→true between try_acquire and release due to
-        // a hot-reload event (which would have left total_connections un-incremented).
+        // Saturating, because a hot reload can flip `enabled` from false to
+        // true between acquire and release — the acquire never incremented,
+        // and an unchecked decrement would underflow the counter.
         self.total_connections.fetch_update(
             Ordering::AcqRel,
             Ordering::Acquire,
@@ -132,6 +146,22 @@ impl ConnectionLimiter {
     }
 }
 
+/// A slot held in [`ConnectionLimiter`], returned when this value drops.
+///
+/// Covers the paths a hand-written `release()` call misses: a failed
+/// WebSocket upgrade (axum drops the callback uninvoked), a cancelled
+/// connection task, and an early return between acquiring and streaming.
+pub struct ConnectionGuard {
+    limiter: Arc<ConnectionLimiter>,
+    ip: IpAddr,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.limiter.release(self.ip);
+    }
+}
+
 /// Constant-time check that `target` matches some element of `list`.
 /// Length mismatch short-circuits per entry (the length itself is not secret),
 /// but byte comparison runs in fixed time so an attacker can't distinguish
@@ -157,10 +187,10 @@ impl AuthMiddleware {
         }
     }
 
-    /// Run `f` against the live config without cloning it. The hot-reload
-    /// snapshot is an `ArcSwap` load (refcount bump); pre-1.5.3 each check
-    /// cloned the whole `AuthConfig` — including the token `Vec<String>` —
-    /// up to three times per request.
+    /// Runs `f` against the live config without cloning it: the hot-reload
+    /// snapshot is an `ArcSwap` load, so a request that checks the enabled
+    /// flag, the header name and the token list reads one consistent snapshot
+    /// and copies none of it.
     fn with_config<R>(&self, f: impl FnOnce(&AuthConfig) -> R) -> R {
         match &self.hot_reload {
             Some(hr) => f(&hr.get().auth),

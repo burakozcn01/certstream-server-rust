@@ -24,6 +24,12 @@ streams:
   full: true          # Full stream (includes DER + chain, ~4-5 KB/cert)
   lite: true          # Lite stream (no DER/chain, ~1 KB/cert)
   domains_only: true  # Domains-only stream (~200 B/cert)
+  # Version 2 output: the same certificate with an explicit source address
+  # (log_id + entry index), entry type, observation time, and what was
+  # actually verified. Off by default — it is a fourth serialization of every
+  # certificate. Served at ws://host/v2 and /sse?stream=v2.
+  # (env: CERTSTREAM_STREAM_V2_ENABLED)
+  v2: false
 
 ct_log:
   retry_max_attempts: 3
@@ -34,6 +40,11 @@ ct_log:
   unhealthy_threshold: 5
   health_check_interval_secs: 60
   state_file: "certstream_state.json"
+  # What to do when state_file exists but cannot be read or parsed.
+  #   fresh (default) — warn and restart every watcher from the log head
+  #   fail            — refuse to start, so a lost position is never silent
+  # A missing state file is a first run and starts fresh under both.
+  state_recovery: fresh
   # Entries requested per get-entries call. Servers clamp to their own max;
   # the watcher adapts to whatever the server actually returns.
   batch_size: 1024
@@ -46,6 +57,35 @@ ct_log:
   # Fresh static-CT watchers start this many leaves behind the checkpoint head.
   # Default preserves the existing head-256 behavior while avoiding full-history replay.
   start_overlap_leaves: 256
+  # How often the CT log list is re-fetched while the server runs, so a log
+  # added to the catalog is picked up without a restart. 0 disables refresh.
+  # (env: CERTSTREAM_CT_LOG_REFRESH_INTERVAL_SECS)
+  log_refresh_interval_secs: 3600
+  # What a refresh does with a running watcher whose log is no longer listed.
+  #   stop (default) — stop it; the saved position is kept, so a log that
+  #                    reappears resumes where it stopped
+  #   keep           — leave it running
+  # Never applies to custom_logs / static_logs entries: those come from this
+  # config, so the catalog delisting them says nothing.
+  # A refresh that fails or resolves zero logs changes nothing.
+  # (env: CERTSTREAM_CT_LOG_REMOVED_POLICY)
+  removed_log_policy: stop
+  # Merkle verification against a static-CT log's own hash tiles.
+  #   off (default)  — trust the checkpoint signature and read
+  #   consistency    — prove each new checkpoint extends the previous one
+  #   full           — consistency, plus prove every ingested entry is in the
+  #                    signed tree
+  # A tile the log will not serve (a 429, or a partial tile it has moved past)
+  # marks the entry `inclusion: unverified` and delivery continues; only a
+  # hash that actually disagrees drops data.
+  # (env: CERTSTREAM_STATIC_CT_MERKLE_VERIFICATION)
+  merkle_verification: off
+  # Read names from the Sunlight names-tiles extension where a log serves it:
+  # off (default) or prefer. Unauthenticated data, published as
+  # `dns_entries_unauthenticated`. Requires domains_only to be the only
+  # enabled stream, and cannot be combined with the NATS output.
+  # (env: CERTSTREAM_STATIC_CT_NAMES_TILES)
+  names_tiles: off
   # Master switches per protocol family. Set `rfc6962_enabled: false` once
   # you've fully cut over to static-ct logs (env: CERTSTREAM_RFC6962_ENABLED).
   rfc6962_enabled: true

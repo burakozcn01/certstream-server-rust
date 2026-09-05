@@ -16,8 +16,8 @@ use parking_lot::RwLock;
 use crate::ct::watcher::HealthStatus;
 use crate::models::{LeafCert, Subject};
 
-/// Issue #15: Use byte-level ASCII operations — avoids the ToUppercase struct overhead
-/// that flat_map(|c| c.to_uppercase()) allocates for each char in the common ASCII case.
+/// Uppercases and strips separators over bytes rather than chars: hashes are
+/// ASCII hex, and `char::to_uppercase` yields an iterator per character.
 #[inline]
 fn normalize_hash(hash: &str) -> String {
     hash.bytes()
@@ -101,10 +101,9 @@ pub struct CertDetail {
     pub cert_link: String,
 }
 
-/// Issue #2: CachedCert shares the Arc<LeafCert> from the message — zero field clones
-/// when building from a parsed cert. Memory for the API cache drops ~50% vs owned fields.
-/// The source is the same Arc the broadcast message carries — two fewer String
-/// allocations per ingested cert.
+/// Shares the `Arc<LeafCert>` and `Arc<Source>` the broadcast message already
+/// holds, so caching a certificate for `/api/cert` costs two refcount bumps
+/// rather than a copy of its fields.
 pub struct CachedCert {
     pub leaf: Arc<LeafCert>,
     pub seen: f64,
@@ -130,7 +129,8 @@ impl CertificateCache {
     pub fn push(&self, cert: CachedCert) {
         let cert = Arc::new(cert);
 
-        // Issue #4: Insert into hash_index first (DashMap — no global lock).
+        // Indexed before it enters the queue, so a lookup never misses a
+        // certificate that is already queued.
         self.hash_index.insert(normalize_hash(&cert.leaf.sha256), Arc::clone(&cert));
         self.hash_index.insert(normalize_hash(&cert.leaf.sha1), Arc::clone(&cert));
         self.hash_index.insert(normalize_hash(&cert.leaf.fingerprint), Arc::clone(&cert));
@@ -147,13 +147,11 @@ impl CertificateCache {
             evicted
         };
 
-        // Remove evicted cert from hash_index after releasing the VecDeque lock.
-        // P1 fix: only remove the index entry if it STILL points at the evicted
-        // Arc. Pre-1.5.0 a re-broadcast of the same SHA-256 after TTL eviction
-        // would overwrite the index with the new Arc, then a subsequent
-        // eviction of the OLDER copy would blindly remove the index entry
-        // that now belongs to the NEWER copy — leaving /api/cert/{hash}
-        // returning 404 for a cert that's still in the queue.
+        // Removed after the VecDeque lock is released, and only if the index
+        // still points at the evicted Arc. The same certificate can be
+        // re-broadcast and re-indexed while an older copy is still queued;
+        // removing unconditionally would drop the newer copy's index entry and
+        // make /api/cert/{hash} return 404 for a certificate still held.
         if let Some(old) = evicted {
             for key in [
                 normalize_hash(&old.leaf.sha256),
@@ -226,6 +224,16 @@ impl LogTracker {
             total_errors: 0,
             last_success: None,
         });
+    }
+
+    /// Drop a log the server has stopped watching, so `/api/logs` and the
+    /// health rollup stop counting a watcher that no longer exists.
+    ///
+    /// The Prometheus per-log gauges keep their last value until the process
+    /// restarts — the exporter has no per-series delete — so a retired log's
+    /// `certstream_ct_log_lag_entries` freezes rather than disappearing.
+    pub fn deregister(&self, url: &str) {
+        self.logs.remove(url);
     }
 
     pub fn update(&self, url: &str, status: HealthStatus, current_index: u64, tree_size: u64, total_errors: u64) {
@@ -426,6 +434,9 @@ mod tests {
             }),
             seen: 1.0,
             source: Arc::new(crate::models::Source {
+                log_id: None,
+                operator: Arc::from("Test"),
+                log_type: "rfc6962",
                 name: Arc::from("test-log"),
                 url: Arc::from("https://ct.test/log"),
             }),

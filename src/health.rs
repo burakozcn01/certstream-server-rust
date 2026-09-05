@@ -111,6 +111,7 @@ pub async fn example_json() -> Json<CertificateMessage> {
     let example = CertificateMessage {
         message_type: Cow::Borrowed("certificate_update"),
         data: CertificateData {
+            verification: Default::default(),
             update_type: Cow::Borrowed("X509LogEntry"),
             leaf_cert: Arc::new(LeafCert {
                 subject: subject.clone(),
@@ -151,6 +152,9 @@ pub async fn example_json() -> Json<CertificateMessage> {
             seen: 1704067200.123,
             submission_timestamp: 1704000000.0,
             source: Arc::new(Source {
+                log_id: Some(Arc::from("example-log-id")),
+                operator: Arc::from("Example Operator"),
+                log_type: "static_ct",
                 name: Arc::from("Google 'Argon2024' log"),
                 url: Arc::from("https://ct.googleapis.com/logs/argon2024"),
             }),

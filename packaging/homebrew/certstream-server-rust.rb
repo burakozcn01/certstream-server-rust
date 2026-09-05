@@ -4,7 +4,7 @@
 class CertstreamServerRust < Formula
   desc "Certificate Transparency log streaming server"
   homepage "https://certstream.dev"
-  version "1.5.6"
+  version "1.6.0"
   license "MIT"
 
   on_macos do

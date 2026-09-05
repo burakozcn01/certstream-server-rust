@@ -1,6 +1,6 @@
 [package]
 name = "certstream-server-rust"
-version = "1.5.6"
+version = "1.6.0"
 edition = "2024"
 repository = "https://github.com/reloading01/certstream-server-rust"
 homepage = "https://certstream.dev"
@@ -43,7 +43,7 @@ simd = ["simd-json"]
 sonic = ["dep:sonic-rs"]
 
 [dependencies]
-tokio = { version = "1.52", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros", "fs", "signal"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "io-std", "macros", "fs", "signal"] }
 axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 tower = { version = "0.5", features = ["util"] }
@@ -85,8 +85,12 @@ rsa = { version = "0.9.10", features = ["sha2", "pem"] }
 rustls = "0.23"
 rustls-native-certs = "0.8"
 static_ct_api = "0.2"
+# Merkle inclusion / consistency verification against a log's hash tiles.
+# Already in the tree via static_ct_api; named here because we use it directly.
+tlog_tiles = "0.2"
 signed_note = "0.2"
 p256 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
+async-nats = "0.50"
 
 # jemalloc as global allocator: the ingest workload churns multi-MB transient
 # buffers across ~100 tasks; system allocators retain the freed pages in
@@ -99,6 +103,8 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
 
 [dev-dependencies]
 rcgen = "0.14"
+# The filter tests build a LeafCert by hand; `all_domains` is a SmallVec.
+smallvec = "1.15"
 
 # cargo-deb: `cargo deb` produces a package that installs the binary, the
 # systemd unit and the example config. The unit uses DynamicUser, so there is

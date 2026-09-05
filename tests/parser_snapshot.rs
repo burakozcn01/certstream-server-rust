@@ -52,6 +52,7 @@ const FIXED_SOURCE_URL: &str = "https://test.example/";
 
 fn stream_all() -> StreamConfig {
     StreamConfig {
+        v2: false,
         full: true,
         lite: true,
         domains_only: true,
@@ -97,6 +98,7 @@ fn build_msg(
     CertificateMessage {
         message_type: Cow::Borrowed("certificate_update"),
         data: CertificateData {
+            verification: Default::default(),
             update_type,
             leaf_cert: Arc::new(leaf_cert),
             chain,
@@ -111,13 +113,16 @@ fn build_msg(
 
 fn test_source() -> Arc<Source> {
     Arc::new(Source {
+        log_id: None,
+        operator: std::sync::Arc::from("Test"),
+        log_type: "rfc6962",
         name: Arc::from(FIXED_SOURCE_NAME),
         url: Arc::from(FIXED_SOURCE_URL),
     })
 }
 
 fn serialize_all(msg: &CertificateMessage) -> (String, String, String) {
-    let pre = PreSerializedMessage::from_certificate(msg, &stream_all())
+    let pre = PreSerializedMessage::from_certificate(msg, &stream_all(), false)
         .expect("pre-serialize must succeed");
     (
         pre.full.as_str().to_string(),
@@ -223,6 +228,9 @@ fn snapshot_live_ct_corpus_matches() {
         };
         let chain = parsed.parse_chain();
         let source = Arc::new(Source {
+            log_id: None,
+            operator: std::sync::Arc::from("Test"),
+            log_type: "rfc6962",
             name: Arc::from(f.log_name.as_str()),
             url: Arc::from(f.log_url.as_str()),
         });
@@ -314,6 +322,9 @@ fn parse_extensions_skip_preserves_domains_only_live_ct() {
             );
         let chain = parsed.parse_chain();
         let source = Arc::new(Source {
+            log_id: None,
+            operator: std::sync::Arc::from("Test"),
+            log_type: "rfc6962",
             name: Arc::from(f.log_name.as_str()),
             url: Arc::from(f.log_url.as_str()),
         });
@@ -663,6 +674,9 @@ async fn fetch_log_window(
         };
         let chain = parsed.parse_chain();
         let source = Arc::new(Source {
+            log_id: None,
+            operator: std::sync::Arc::from("Test"),
+            log_type: "rfc6962",
             name: Arc::from(log_name),
             url: Arc::from(log_url),
         });

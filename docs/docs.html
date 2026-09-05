@@ -289,6 +289,7 @@
                         <tr><td><code>ws://host:8080/</code></td><td>Lite stream (no DER / chain)</td></tr>
                         <tr><td><code>ws://host:8080/full-stream</code></td><td>Full data with DER and chain</td></tr>
                         <tr><td><code>ws://host:8080/domains-only</code></td><td>Domain names only (<code>message_type: "dns_entries"</code>)</td></tr>
+                        <tr><td><code>ws://host:8080/v2</code></td><td>Version 2 output (off by default)</td></tr>
                     </tbody>
                 </table>
                 <h3>SSE</h3>
@@ -298,6 +299,7 @@
                         <tr><td><code>http://host:8080/sse</code></td><td>Lite (default)</td></tr>
                         <tr><td><code>http://host:8080/sse?stream=full</code></td><td>Full</td></tr>
                         <tr><td><code>http://host:8080/sse?stream=domains</code></td><td>Domains only</td></tr>
+                        <tr><td><code>http://host:8080/sse?stream=v2</code></td><td>Version 2 output (off by default)</td></tr>
                     </tbody>
                 </table>
                 <h3>HTTP</h3>
@@ -320,6 +322,151 @@
                         <tr><td><code>GET /api/cert/{hash}</code></td><td>Lookup certificate by SHA256, SHA1, or fingerprint</td></tr>
                     </tbody>
                 </table>
+            </div>
+        </section>
+
+
+        <section id="filters">
+            <div class="wrap">
+                <div class="section-header">
+                    <span class="eyebrow">Filtering</span>
+                    <h2>Server-side filters</h2>
+                </div>
+                <p style="margin-bottom: 1rem;">Every WebSocket and SSE endpoint accepts <code>domain</code> and <code>issuer</code> query parameters. Terms inside one parameter are alternatives; the two parameters narrow together.</p>
+<pre><code>wscat -c 'ws://localhost:8080/?domain=example.com,example.org'
+curl -N 'http://localhost:8080/sse?stream=lite&amp;domain=example.com&amp;issuer=let%27s+encrypt'</code></pre>
+                <table class="endpoints-table">
+                    <thead><tr><th>Parameter</th><th>Matches</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>domain</code></td><td>The name itself and any subdomain, at label boundaries. <code>example.com</code> matches <code>example.com</code>, <code>www.example.com</code> and <code>*.example.com</code>; it does not match <code>notexample.com</code>.</td></tr>
+                        <tr><td><code>issuer</code></td><td>Case-insensitive substring of the issuer CN or O, so both <code>R10</code> and <code>let's encrypt</code> work.</td></tr>
+                    </tbody>
+                </table>
+                <p style="margin-top: 1rem;">Up to 20 terms per parameter and 64 distinct filters server-wide; beyond either limit the subscription is rejected with <code>400</code>. Subscribers using the same filter share a group, so each filter is evaluated once per certificate regardless of how many clients use it, and the already-serialized payload is passed to the group rather than re-rendered per client. A server with no filtered subscribers performs no filter matching.</p>
+                <p>A filtered subscriber can lose messages in two places: on its own connection, and in the shared dispatcher before matching. Both are reported through the SSE <code>gap</code> event and the lag counters. Dispatcher loss cannot be attributed to a specific filter, so the reported count is raw certificates rather than matches.</p>
+            </div>
+        </section>
+
+        <section id="v2">
+            <div class="wrap">
+                <div class="section-header">
+                    <span class="eyebrow">Output v2</span>
+                    <h2>Version 2 messages</h2>
+                    <p>Source and verification details for each record.</p>
+                </div>
+                <p style="margin-bottom: 1rem;">Off by default. Enable with <code>CERTSTREAM_STREAM_V2_ENABLED=true</code>, then connect to <code>ws://host:8080/v2</code> or <code>/sse?stream=v2</code>. The v1 streams are the CertStream shape and are unchanged; these fields appear only in v2.</p>
+<pre><code>{
+  "message_type": "certificate_update",
+  "version": 2,
+  "data": {
+    "source": {
+      "name": "Let's Encrypt 'Sycamore2026h2'",
+      "url": "https://mon.sycamore.ct.letsencrypt.org/2026h2",
+      "log_id": "bP5QGUOoXqkWvFLRM+TcyR7xQRx9JYQg0XOAnhgY6zo=",
+      "operator": "lets encrypt",
+      "log_type": "static_ct"
+    },
+    "entry": {
+      "index": 1000,
+      "type": "x509",
+      "observed_at": "2026-09-05T14:42:41.260Z",
+      "submitted_at": "2025-09-09T01:01:44.517Z",
+      "link": "https://mon.sycamore.ct.letsencrypt.org/2026h2/tile/data/003"
+    },
+    "verification": {
+      "checkpoint_signature": "verified",
+      "inclusion": "unverified"
+    },
+    "cert": { "...": "as in the lite stream" }
+  }
+}</code></pre>
+                <p style="margin-top: 1rem;"><code>(source.log_id, entry.index)</code> identifies the record at its source; the certificate's SHA-256 identifies the certificate. One certificate appears in several logs at different indices, so the two are separate keys. <code>source.operator</code> is the operator name as the catalog spells it; the canonical key used by <code>ct_log.operator_rate_limits</code> and the metric labels is that name lowercased with punctuation collapsed.</p>
+                <h3>verification</h3>
+                <p style="margin-bottom: 1rem;">Records which checks were performed and what they found.</p>
+                <table class="endpoints-table">
+                    <thead><tr><th>Value</th><th>Meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>verified</code></td><td>The check ran and passed</td></tr>
+                        <tr><td><code>unverified</code></td><td>The check did not run, or could not run on this input</td></tr>
+                        <tr><td><code>failed</code></td><td>The check ran and failed; <code>checkpoint_signature_mode</code> decides whether the entry is still ingested</td></tr>
+                        <tr><td><code>not_applicable</code></td><td>The check does not apply &mdash; an RFC 6962 log serves no checkpoint</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section id="merkle">
+            <div class="wrap">
+                <div class="section-header">
+                    <span class="eyebrow">Verification</span>
+                    <h2>Merkle verification</h2>
+                    <p>Verify that fetched entries belong to the tree represented by the signed checkpoint.</p>
+                </div>
+                <p style="margin-bottom: 1rem;">Off by default, and static-CT only. A valid checkpoint signature authenticates the tree root, but does not by itself prove that recently fetched entries are included in that tree, or that the tree is consistent with one observed earlier. Both properties can be verified from the log's own hash tiles.</p>
+                <table class="endpoints-table">
+                    <thead><tr><th>Mode</th><th>What it proves</th><th>Cost</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>off</code></td><td>Nothing beyond the checkpoint signature</td><td>None</td></tr>
+                        <tr><td><code>consistency</code></td><td>Each new checkpoint extends the previous one, so the log has not rewritten history</td><td>A few hash-tile fetches per checkpoint</td></tr>
+                        <tr><td><code>full</code></td><td>Consistency, plus that every ingested entry is in the signed tree</td><td>Fetches and hashing proportional to ingest</td></tr>
+                    </tbody>
+                </table>
+<pre><code>CERTSTREAM_STATIC_CT_MERKLE_VERIFICATION=full certstream-server-rust</code></pre>
+                <p style="margin-top: 1rem;">If a tile cannot be fetched — a 429, or a partial tile the log has moved past — the entry is treated as unverified rather than invalid: it is marked <code>inclusion: unverified</code> and delivery continues. Only a hash mismatch drops the tile. The two outcomes are counted separately as <code>certstream_static_ct_inclusion_unavailable</code> and <code>certstream_static_ct_inclusion_failed</code>, with the same split for consistency.</p>
+                <p>Verification fetches use the same per-operator rate limiter as ingest, so enabling this does not increase the request rate an operator sees. Consistency is anchored on the first checkpoint of each process; the previous root is held in memory rather than the state file, so a restart re-anchors instead of proving continuity across it.</p>
+                <p>Measured over 80 seconds against the live static-CT log set: 36,570 entries verified as included and 78 consistency proofs verified, with 11 tiles and 4 proofs unavailable and no mismatches.</p>
+            </div>
+        </section>
+
+        <section id="names-tiles">
+            <div class="wrap">
+                <div class="section-header">
+                    <span class="eyebrow">Collection</span>
+                    <h2>Names tiles</h2>
+                </div>
+                <p style="margin-bottom: 1rem;">Some static-CT logs serve an optional extension that publishes the names on the certificates in a data tile as compact JSON lines. Set <code>CERTSTREAM_STATIC_CT_NAMES_TILES=prefer</code> to read those instead of parsing data tiles; logs that do not serve the extension fall back to the normal path automatically.</p>
+                <p>Measured on Geomys' Tuscolo, a names tile is roughly 3% of the size of the equivalent data tile (6.6 KB against 226 KB) and requires no X.509 parsing.</p>
+                <p>Names-tile data is not authenticated by the CT tree: the extension cannot be checked for inclusion in a signed tree head. Entries collected this way are published as <code>message_type: "dns_entries_unauthenticated"</code>, never as <code>dns_entries</code>. Cross-log dedup is unavailable in this mode, since there is no certificate hash to dedup on.</p>
+                <p>A names tile carries no certificate, so this mode requires <code>domains_only</code> to be the only enabled stream and cannot be combined with the JetStream output. These combinations are rejected during configuration validation.</p>
+            </div>
+        </section>
+
+        <section id="jetstream">
+            <div class="wrap">
+                <div class="section-header">
+                    <span class="eyebrow">Durable output</span>
+                    <h2>NATS JetStream</h2>
+                    <p>Durable delivery for consumers that may disconnect.</p>
+                </div>
+                <p style="margin-bottom: 1rem;">A WebSocket subscriber misses whatever arrives while it is disconnected. Enable <code>CERTSTREAM_NATS_ENABLED=true</code> and records are also published to JetStream, where a durable consumer resumes from where it stopped.</p>
+                <p>To reduce record loss and duplicate delivery, the JetStream path uses three additional mechanisms:</p>
+                <ul style="margin: 0 0 1rem 1.25rem;">
+                    <li><strong>The saved position follows acknowledgements, not reads.</strong> A watcher that has read to entry N but had only M acknowledged persists M, and a restart re-reads <code>M..N</code>. The tracker advances on the contiguous acknowledged prefix, so an out-of-order acknowledgement cannot step over a gap.</li>
+                    <li><strong>Republished records keep a stable identity.</strong> The <code>Nats-Msg-Id</code> is <code>&lt;log_id&gt;:&lt;index&gt;</code>, the same address the v2 output uses, so a re-read after a restart is deduplicated by the server inside its duplicate window (15 minutes by default) instead of appearing twice.</li>
+                    <li><strong>Stream-full behavior is configurable.</strong> The stream is created with <code>discard: new</code>, so it refuses the write rather than deleting records a stopped consumer had not read. <code>CERTSTREAM_NATS_ON_FULL</code> decides what happens next: <code>block</code> (default) retries the record until the server stores it, and the queue behind it pushes back on ingest; <code>drop</code> gives up on the record and lets the position move past it.</li>
+                </ul>
+                <p>Records are published to <code>certstream.&lt;operator&gt;.&lt;log&gt;</code>, so a consumer can subscribe to one operator or one log rather than the whole feed.</p>
+                <p>Cross-log dedup does not apply to the durable path. A record is addressed by <code>(log_id, index)</code>, so a certificate present in three logs produces three records; dropping the duplicates would leave gaps in those logs' acknowledged positions. The live WebSocket and SSE streams still deduplicate.</p>
+                <p>Delivery is at-least-once for the entries this server reads, not exactly-once end to end. Records discarded in <code>drop</code> mode are not retried, and entries that fail to parse produce no record.</p>
+            </div>
+        </section>
+
+        <section id="backfill">
+            <div class="wrap">
+                <div class="section-header">
+                    <span class="eyebrow">Backfill</span>
+                    <h2>Historical range export</h2>
+                </div>
+<pre><code>certstream-server-rust --backfill --log "Sycamore2026h2" --start 1000 --end 2000 --out range.jsonl</code></pre>
+                <table class="endpoints-table">
+                    <thead><tr><th>Flag</th><th>Meaning</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>--log</code></td><td>CT log URL, log ID, or a substring of its name. An ambiguous substring is an error, not a guess.</td></tr>
+                        <tr><td><code>--start</code>, <code>--end</code></td><td>Entry index range, both inclusive</td></tr>
+                        <tr><td><code>--out</code></td><td>Output file; omit it or pass <code>-</code> for stdout</td></tr>
+                    </tbody>
+                </table>
+                <p style="margin-top: 1rem;">Writes one v2 record per line. The index range is fixed before the first request, making the job finite and repeatable, and the live state file is never written, so a backfill cannot move the position of a running server. Supports both RFC 6962 <code>get-entries</code> and static-CT data tiles, using the same per-operator rate limit as the watchers. Chain certificates are omitted for static-CT logs, which serve issuers from a separate endpoint. Exits non-zero if any fetch failed.</p>
             </div>
         </section>
 
@@ -531,6 +678,30 @@ docker compose up -d</pre>
                 </table>
                 <p style="margin-bottom: 1rem;"><code>CERTSTREAM_CT_LOG_FORCE_HTTP1_OPERATORS</code> changes how many TCP connections concurrent fetches use. On its own it does not imply higher throughput; see <a href="/blog/http2-multiplexing-vs-per-connection-rate-limits.html">the measurements</a>.</p>
 
+                <h3>Verification and collection</h3>
+                <table class="endpoints-table">
+                    <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>CERTSTREAM_CT_LOG_STATE_RECOVERY</code></td><td><code>fresh</code></td><td>Unreadable state file: <code>fresh</code> restarts from the log head, <code>fail</code> refuses to start</td></tr>
+                        <tr><td><code>CERTSTREAM_CT_LOG_REFRESH_INTERVAL_SECS</code></td><td><code>3600</code></td><td>Log-list refresh interval while running; <code>0</code> disables it</td></tr>
+                        <tr><td><code>CERTSTREAM_CT_LOG_REMOVED_POLICY</code></td><td><code>stop</code></td><td>What a refresh does with a delisted log: <code>stop</code> or <code>keep</code></td></tr>
+                        <tr><td><code>CERTSTREAM_STATIC_CT_MERKLE_VERIFICATION</code></td><td><code>off</code></td><td><code>off</code>, <code>consistency</code>, or <code>full</code></td></tr>
+                        <tr><td><code>CERTSTREAM_STATIC_CT_NAMES_TILES</code></td><td><code>off</code></td><td><code>off</code> or <code>prefer</code></td></tr>
+                        <tr><td><code>CERTSTREAM_STREAM_V2_ENABLED</code></td><td><code>false</code></td><td>Serve the version 2 output</td></tr>
+                    </tbody>
+                </table>
+                <h3>NATS JetStream</h3>
+                <table class="endpoints-table">
+                    <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>CERTSTREAM_NATS_ENABLED</code></td><td><code>false</code></td><td>Publish records to JetStream</td></tr>
+                        <tr><td><code>CERTSTREAM_NATS_URL</code></td><td><code>nats://127.0.0.1:4222</code></td><td>Broker URL</td></tr>
+                        <tr><td><code>CERTSTREAM_NATS_STREAM</code></td><td><code>CERTSTREAM</code></td><td>Stream name</td></tr>
+                        <tr><td><code>CERTSTREAM_NATS_SUBJECT_PREFIX</code></td><td><code>certstream</code></td><td>Subjects are <code>&lt;prefix&gt;.&lt;operator&gt;.&lt;log&gt;</code></td></tr>
+                        <tr><td><code>CERTSTREAM_NATS_MAX_BYTES</code></td><td><code>8589934592</code></td><td>Stream size cap (8 GiB)</td></tr>
+                        <tr><td><code>CERTSTREAM_NATS_ON_FULL</code></td><td><code>block</code></td><td><code>block</code> holds the position back, <code>drop</code> gives up on the record</td></tr>
+                    </tbody>
+                </table>
                 <h3>Hot reload</h3>
                 <table class="endpoints-table">
                     <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
@@ -623,17 +794,17 @@ docker compose up -d</pre>
                 <div class="section-header">
                     <span class="eyebrow">Performance</span>
                     <h2>Performance</h2>
-                    <p>v1.5.3 compared with v1.5.2 on the same host, using the default configuration, 100 concurrent WebSocket clients on the lite stream, and a 10-minute steady-state window.</p>
+                    <p>v1.6.0 measured over a 3-hour run with the default configuration, all four stream formats enabled, and two WebSocket subscribers (one filtered).</p>
                 </div>
                 <div class="stat-grid">
-                    <div class="stat-cell"><div class="num">+70<span class="unit">%</span></div><div class="lbl">Sustained throughput vs v1.5.2</div></div>
-                    <div class="stat-cell"><div class="num">−50<span class="unit">%</span></div><div class="lbl">CPU per delivered message</div></div>
-                    <div class="stat-cell"><div class="num">0</div><div class="lbl">Copies per subscriber broadcast</div></div>
-                    <div class="stat-cell"><div class="num">flat</div><div class="lbl">RSS over time, after startup and catch-up bursts</div></div>
+                    <div class="stat-cell"><div class="num">335<span class="unit">msg/s</span></div><div class="lbl">Delivered throughput, 5.4 GB out</div></div>
+                    <div class="stat-cell"><div class="num">4.6<span class="unit">%</span></div><div class="lbl">CPU, mean of one core</div></div>
+                    <div class="stat-cell"><div class="num">168<span class="unit">MB</span></div><div class="lbl">RSS, mean (196 MB peak)</div></div>
+                    <div class="stat-cell"><div class="num">0</div><div class="lbl">Messages missed by subscribers</div></div>
                 </div>
+                <p style="margin-top: 1rem;">Throughput and resource use do not describe how current the stream is. Over the same run the median log sat about 20 minutes behind its head, and 19 of 45 logs were more than 5,000 entries behind, with no subscriber loss and no runaway growth. The delay rose during initial catch-up, peaked near 29 minutes, and then held. <code>certstream_ct_log_ingest_delay_seconds</code> and <code>certstream_ct_log_lag_entries</code> report both figures per log; <code>soak/measure.sh</code> samples them alongside CPU and RSS.</p>
                 <p style="margin-top: 24px; color: var(--ink-3); font-size: 0.9rem; max-width: 70ch;">
-                    These numbers describe that benchmark configuration. They are not throughput guarantees for
-                    other hosts or workloads.
+                    Results are specific to this benchmark and will vary by host and workload.
                 </p>
             </div>
         </section>

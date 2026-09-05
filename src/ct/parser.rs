@@ -15,7 +15,8 @@ use x509_parser::prelude::*;
 
 use crate::models::{ChainCert, DomainList, Extensions, LeafCert, Subject};
 
-// Issue #6: OID constants for DN attributes — compared directly, no string allocation.
+// DN attribute OIDs, compared against the certificate's OIDs directly rather
+// than by rendering each attribute to a string.
 const OID_CN: Oid<'static> = oid!(2.5.4.3);
 const OID_C: Oid<'static> = oid!(2.5.4.6);
 const OID_L: Oid<'static> = oid!(2.5.4.7);
@@ -24,7 +25,6 @@ const OID_O: Oid<'static> = oid!(2.5.4.10);
 const OID_OU: Oid<'static> = oid!(2.5.4.11);
 const OID_EMAIL: Oid<'static> = oid!(1.2.840.113549.1.9.1);
 
-// Issue #7: OID constants for signature algorithms.
 const OID_MD2_RSA: Oid<'static> = oid!(1.2.840.113549.1.1.2);
 const OID_MD5_RSA: Oid<'static> = oid!(1.2.840.113549.1.1.4);
 const OID_SHA1_RSA: Oid<'static> = oid!(1.2.840.113549.1.1.5);
@@ -237,24 +237,23 @@ pub fn parse_certificate_with_options(der_bytes: &[u8], opts: ParseOptions) -> O
 
     let sha1_hash = calculate_sha1(der_bytes);
     let (sha256_raw, sha256_hash) = calculate_sha256(der_bytes);
-    // Issue #12: fingerprint == sha1. Build Arc<str> from sha1 first, then move sha1 into the
-    // struct — zero clone, zero extra heap allocation vs the previous sha1_hash.clone().
+    // `fingerprint` and `sha1` are the same value; sharing one allocation
+    // between them keeps a single copy per certificate.
     let fingerprint: Arc<str> = Arc::from(sha1_hash.as_str());
 
-    // Issue #7: returns &'static str — no OID string allocation, no result string allocation.
     let signature_algorithm = parse_signature_algorithm(&cert);
     let is_ca = cert.is_ca();
 
     let mut all_domains = DomainList::new();
-    // Issue #8: AHashSet<&str> — borrows rather than owns; AHash is ~4× faster than SipHash.
-    // Pre-sized to expected domain count (most certs have < 16 SANs).
+    // Borrows from the parsed certificate rather than owning, so deduplicating
+    // SANs costs nothing until a name is actually kept. Sized for the common
+    // case of fewer than 16 SANs.
     let mut seen_domains: AHashSet<&str> = AHashSet::with_capacity(8);
 
     if let Some(ref cn) = subject.cn
         && !cn.is_empty()
         && !is_ca
     {
-        // Issue #8: borrow cn into the set (no clone); one clone only for all_domains.
         seen_domains.insert(cn.as_str());
         all_domains.push(cn.clone());
     }
@@ -301,12 +300,11 @@ fn parse_chain_from_bytes(
         return chain;
     }
 
-    // RFC 6962 §3.1 `Certificate certificate_chain<0..2^24-1>`:
-    // the 3-byte prefix is the BYTE length of the chain blob. Pre-1.5.0 we
-    // ignored it and ran until `bytes.len()`, which let a server pad the
-    // `extra_data` field with extra cert structures past the declared
-    // boundary — those would be parsed and surfaced as part of the chain.
-    // Enforce the declared end now.
+    // RFC 6962 §3.1 `Certificate certificate_chain<0..2^24-1>`: the 3-byte
+    // prefix is the BYTE length of the chain blob, and parsing must stop
+    // there. Running to `bytes.len()` instead would let a server pad
+    // `extra_data` with further certificate structures past the declared
+    // boundary and have them surface as part of the chain.
     let chain_byte_len = u32::from_be_bytes([
         0,
         bytes[start_offset],
@@ -343,7 +341,8 @@ fn parse_chain_from_bytes(
     chain
 }
 
-/// Issue #6: Compare OIDs directly — eliminates per-attribute string allocation.
+/// Reads a DN by comparing attribute OIDs directly, rather than rendering
+/// each attribute to a string first.
 fn extract_name(name: &X509Name) -> Subject {
     let mut subject = Subject::default();
 
@@ -405,9 +404,9 @@ fn push_formatted<A: smallvec::Array<Item = String>>(
     });
 }
 
-/// Issue #8: AHashSet<&str> — borrows &str from the parsed cert directly.
-/// On new SAN entry: one allocation (dns.to_string() into all_domains only).
-/// On duplicate: zero allocations (insert returns false, nothing pushed).
+/// SAN deduplication borrows `&str` from the parsed certificate, so a
+/// duplicate name costs a lookup and a new name costs one `to_string` into
+/// `all_domains`.
 ///
 /// §1.5a: `with_display_strings` controls whether to build the display-only
 /// extension fields (subject_alt_name, AIA, policies, KU, EKU, AKI, SKI,
@@ -436,8 +435,6 @@ fn parse_extensions<'cert>(
                 for name in &san.general_names {
                     match name {
                         GeneralName::DNSName(dns) => {
-                            // Issue #8: insert borrows &str directly — no allocation on hit.
-                            // Single dns.to_string() alloc only on new (non-duplicate) entry.
                             if seen_domains.insert(*dns) {
                                 all_domains.push(dns.to_string());
                             }
@@ -571,8 +568,8 @@ fn calculate_sha1(data: &[u8]) -> String {
     hash
 }
 
-/// Issue #1 (partial) + #7: Returns both raw bytes ([u8; 32]) and the colon-hex string.
-/// The raw bytes serve as a zero-alloc key in DedupFilter.
+/// Returns the digest twice: raw bytes, which `DedupFilter` keys on without
+/// allocating, and the colon-hex form the wire format carries.
 fn calculate_sha256(data: &[u8]) -> ([u8; 32], String) {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -588,8 +585,8 @@ fn calculate_sha256(data: &[u8]) -> ([u8; 32], String) {
     (raw, hash)
 }
 
-/// Issue #7: Returns &'static str — eliminates OID-to-string allocation AND result-string
-/// allocation. The Cow::Borrowed wrapper in LeafCert carries zero allocation cost.
+/// Maps the signature OID to a static name, so neither the OID nor the result
+/// is rendered to an owned string per certificate.
 fn parse_signature_algorithm(cert: &X509Certificate) -> &'static str {
     let oid = &cert.signature_algorithm.algorithm;
     if oid == &OID_SHA256_RSA {

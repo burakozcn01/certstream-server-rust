@@ -189,12 +189,10 @@ impl RateLimiter {
     }
 
     pub fn cleanup_stale(&self, max_age: Duration) {
-        // P1 fix: pre-1.5.0 ran a `retain` closure that took `v.lock()` while
-        // holding the shard write lock. Request-path access from another IP
-        // in the same shard had to wait for the shard write lock, even
-        // though only one stale entry's inner mutex was being inspected.
-        //
-        // New approach: snapshot candidate keys with a quick shard READ
+        // Deliberately not a `retain` closure taking `v.lock()` under the
+        // shard write lock: that makes every request for an unrelated IP in
+        // the same shard wait while one stale entry's inner mutex is
+        // inspected. Instead, snapshot candidate keys with a quick shard READ
         // (only checks `last_refill` under inner lock, then releases), then
         // remove them one-by-one. Each remove takes the shard write lock
         // briefly, no nested inner-mutex hold.

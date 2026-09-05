@@ -151,3 +151,91 @@ fn garbage_config_no_panic() {
         "bad YAML must not panic. stderr:\n{stderr}"
     );
 }
+
+/// `ct_log.state_recovery: fail` must refuse to start on a state file it
+/// cannot parse, rather than silently re-reading every log from the head.
+#[test]
+fn corrupt_state_file_exits_under_fail_recovery() {
+    let Some(bin) = skip_if_no_binary() else { return };
+
+    let state = std::env::temp_dir().join(format!(
+        "certstream-bad-state-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&state, "{ this is not json").unwrap();
+
+    // A real port: state recovery runs after config validation, and port 0
+    // fails validation first.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let out = Command::new(&bin)
+        .env("CERTSTREAM_HOST", "127.0.0.1")
+        .env("CERTSTREAM_PORT", port.to_string())
+        .env("CERTSTREAM_LOG_LEVEL", "error")
+        .env("CERTSTREAM_CONFIG", "/nonexistent")
+        .env("CERTSTREAM_CT_LOG_STATE_FILE", state.to_str().unwrap())
+        .env("CERTSTREAM_CT_LOG_STATE_RECOVERY", "fail")
+        .arg("--dry-run")
+        .output()
+        .expect("spawn");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_file(&state);
+
+    assert!(
+        !stderr.contains("panicked at"),
+        "state recovery failure must not panic. stderr:\n{stderr}"
+    );
+    assert!(!out.status.success(), "fail recovery must exit non-zero");
+    assert!(
+        stderr.contains("State recovery failed"),
+        "expected the state recovery message, got:\n{stderr}"
+    );
+}
+
+/// The default policy is unchanged: the same corrupt file is a warning, and
+/// the server boots.
+#[test]
+fn corrupt_state_file_boots_under_fresh_recovery() {
+    let Some(bin) = skip_if_no_binary() else { return };
+
+    let state = std::env::temp_dir().join(format!(
+        "certstream-bad-state-fresh-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&state, "{ this is not json").unwrap();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let mut child = Command::new(&bin)
+        .env("CERTSTREAM_HOST", "127.0.0.1")
+        .env("CERTSTREAM_PORT", port.to_string())
+        .env("CERTSTREAM_LOG_LEVEL", "error")
+        .env("CERTSTREAM_CONFIG", "/nonexistent")
+        .env("CERTSTREAM_CT_LOG_STATE_FILE", state.to_str().unwrap())
+        .arg("--dry-run")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn");
+
+    std::thread::sleep(Duration::from_secs(2));
+    let still_running = child.try_wait().expect("try_wait").is_none();
+    let _ = child.kill();
+    let out = child.wait_with_output().unwrap();
+    let _ = std::fs::remove_file(&state);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("panicked at"),
+        "default recovery must not panic. stderr:\n{stderr}"
+    );
+    assert!(
+        still_running,
+        "default recovery must boot through a corrupt state file. stderr:\n{stderr}"
+    );
+}

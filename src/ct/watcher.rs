@@ -38,8 +38,8 @@ struct LogHealthInner {
     current_backoff_ms: u64,
 }
 
-/// Issue #9: AtomicU8 mirrors inner.circuit for a lock-free fast path in should_attempt().
-/// The common case (Closed) reads one atomic without touching the Mutex at all.
+/// Mirror of `inner.circuit`, kept in sync under the same lock. Lets the
+/// common Closed case be read without touching the Mutex.
 const CIRCUIT_CLOSED: u8 = 0;
 const CIRCUIT_OPEN: u8 = 1;
 const CIRCUIT_HALF_OPEN: u8 = 2;
@@ -188,10 +188,9 @@ impl LogHealth {
         self.inner.lock().circuit
     }
 
-    /// Issue #9: Lock-free fast path for the common Closed/HalfOpen case.
-    /// Only acquires the Mutex when the circuit is Open (rare), to check the timeout
-    /// and potentially transition to HalfOpen. The AtomicU8 is always kept in sync
-    /// with `inner.circuit` under the lock.
+    /// Reads the mirrored state for the common Closed/HalfOpen case and takes
+    /// the Mutex only when the circuit is Open, to check the timeout and
+    /// possibly transition to HalfOpen.
     pub fn should_attempt(&self) -> bool {
         match self.circuit_fast.load(Ordering::Acquire) {
             CIRCUIT_CLOSED | CIRCUIT_HALF_OPEN => true, // ← ~1ns, no lock
@@ -239,6 +238,8 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
         tracker,
         shutdown,
         dedup,
+        filters,
+        nats,
         rate_limiter,
         streams,
         issuer_cache: _, // RFC6962 watcher doesn't use the issuer cache (no /issuer/ endpoint).
@@ -267,10 +268,33 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
     let log_name = log.description.clone();
     let source_id = super::normalize::source_id(log.log_id.as_deref(), &base_url);
     let log_id_label = log.log_id.clone().unwrap_or_default();
+    let nats_subject = nats.as_ref().map(|_| {
+        format!(
+            "certstream.{}.{}",
+            crate::ct::static_ct::subject_token(&log.operator),
+            crate::ct::static_ct::subject_token(&log.description)
+        )
+    });
+    let log_id_for_msgs: Arc<str> = Arc::from(
+        log.log_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(base_url.as_str()),
+    );
+
     let source = Arc::new(Source {
         name: Arc::from(log.description.as_str()),
         url: Arc::from(base_url.as_str()),
+        log_id: log.log_id.as_deref().map(Arc::from),
+        operator: Arc::from(log.operator_name()),
+        log_type: "rfc6962",
     });
+    // RFC 6962 logs serve no checkpoint, so there is no checkpoint signature
+    // to verify — that is a different answer from "we did not check".
+    let verification = crate::models::Verification {
+        checkpoint_signature: crate::models::VerificationState::NotApplicable,
+        inclusion: crate::models::VerificationState::Unverified,
+    };
 
     metrics::gauge!(
         "certstream_ct_runtime_log_info",
@@ -291,10 +315,10 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
     // pipelined windows stay aligned) and probes back up on full responses.
     let mut effective_batch: u64 = config.batch_size.max(1);
 
-    // Per-watcher reusable JSON parse buffer. Pre-1.5.0 every get-entries
-    // response did `let mut v = b.to_vec();` — a fresh ~1.5 MB allocation
-    // per poll (256 entries × ~5 KB). Reusing the buffer keeps the capacity
-    // stable after the first response and turns the hottest transient
+    // Per-watcher reusable JSON parse buffer. A fresh `to_vec()` per
+    // get-entries response is a multi-hundred-KB allocation per poll; reusing
+    // the buffer keeps the capacity stable after the first response and turns
+    // the hottest transient
     // allocator (heap profile: ~16 MB across 30 watchers) into a one-time
     // amortised cost.
     #[cfg(feature = "simd")]
@@ -307,8 +331,8 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
     #[cfg(feature = "simd")]
     const JSON_BUF_RETAIN_MAX: usize = 512 * 1024;
 
-    // Issue #3: Pre-register metric counter handles — eliminates one String allocation
-    // per certificate in the hot loop. The handle captures the label at startup time.
+    // Metric handles are registered once, with their labels, so the hot loop
+    // does not allocate a label string per certificate.
     let counter_messages = metrics::counter!(
         "certstream_messages_sent",
         "log" => log_name.clone(),
@@ -338,12 +362,10 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
     // every poll / health check.
     let sth_url = format!("{}/ct/v1/get-sth", base_url);
 
-    // P1 fix: RFC6962 tree_size rollback guard, parallel to static_ct.rs's
-    // (which #5 introduced). RFC6962 STH tree_size is monotonically
-    // non-decreasing; a shrinking value means operator bug, replica
-    // inconsistency, or MITM. Pre-1.5.0 RFC6962 silently followed any
-    // tree_size — only static-CT had the guard. Re-seed from persisted state
-    // so the protection survives restarts.
+    // Rollback guard, matching the static-CT watcher's. An RFC 6962 STH
+    // tree_size is monotonically non-decreasing; a shrinking value means an
+    // operator bug, an inconsistent replica, or a MITM. Re-seeded from
+    // persisted state so the guard survives a restart.
     let mut high_water_tree_size: u64 = state_manager.get_tree_size(&base_url).unwrap_or(0);
 
     let mut current_index = if let Some(saved_index) = state_manager.get_index(&base_url) {
@@ -383,6 +405,12 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
         }
     };
 
+    // The durable output's acknowledged position starts where this watcher
+    // does, so the contiguous prefix has something to grow from.
+    if let Some(sink) = &nats {
+        sink.acks.resume_at(&base_url, current_index);
+    }
+
     loop {
         if shutdown.is_cancelled() {
             info!(log = %log.description, "shutdown signal received");
@@ -402,10 +430,11 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
             debug!(log = %log.description, errors = health.total_errors(), "log is unhealthy, waiting for recovery check");
             sleep(Duration::from_secs(config.health_check_interval_secs)).await;
 
-            // P1 fix: pre-1.5.0 this matched only Ok(_) vs Err(_), so a 5xx
-            // or 429 response marked the log healthy and immediately entered
-            // the get-entries loop — which failed again, oscillating between
-            // healthy and unhealthy without ever backing off properly.
+            // The status has to be inspected, not just the transport result:
+            // treating a 5xx or 429 as healthy sends the watcher straight back
+            // into the get-entries loop, which fails again, and the log
+            // oscillates between healthy and unhealthy without ever backing
+            // off.
             match client.get(&sth_url).timeout(timeout).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     health.record_success(config.healthy_threshold);
@@ -615,9 +644,9 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                     }
                 };
 
-                // Issue #14: simd-json for 2-4× faster deserialization of the entries
-                // response — the largest JSON payload in the hot path. simd_json::from_slice
-                // requires &mut [u8] (it scribbles over the buffer for string escaping),
+                // simd-json for the entries response, the largest JSON payload
+                // in the hot path. `simd_json::from_slice` requires `&mut [u8]`
+                // (it rewrites the buffer in place for string escaping),
                 // so we copy into the per-watcher reusable Vec (processing is
                 // sequential even though fetching is pipelined, so one buffer
                 // still suffices).
@@ -667,6 +696,12 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                         let job_cache = Arc::clone(&cache);
                         let job_stats = Arc::clone(&stats);
                         let job_streams = Arc::clone(&streams);
+                        let job_retain_leaf = filters.active();
+                        let job_durable = nats.is_some();
+                        let job_nats_subject = nats_subject.clone().unwrap_or_default();
+                        let job_log_url: Arc<str> = Arc::from(base_url.as_str());
+                        let job_log_key = log_id_for_msgs.clone();
+                        let job_verification = verification;
                         let job_source = Arc::clone(&source);
                         let job_counter_messages = counter_messages.clone();
                         let job_counter_parse_failures = counter_parse_failures.clone();
@@ -678,6 +713,17 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                         let full_stream_enabled = streams.full;
                         let join = tokio::task::spawn_blocking(move || {
                             let mut max_index_seen = batch_start;
+                            let mut newest_submission = 0.0f64;
+                            let mut durable: Vec<crate::nats::Record> = Vec::new();
+                            let mut skipped: Vec<u64> = Vec::new();
+                            let targets = crate::ct::BroadcastTargets {
+                                tx: &job_tx,
+                                cache: &job_cache,
+                                stats: &job_stats,
+                                messages_counter: &job_counter_messages,
+                                streams: &job_streams,
+                                retain_leaf: job_retain_leaf,
+                            };
                             for (i, entry) in entries.into_iter().enumerate() {
                                 let cert_index = batch_start + i as u64;
                                 max_index_seen = max_index_seen.max(cert_index);
@@ -690,21 +736,30 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                                     None => {
                                         debug!(log = %job_log_name, index = cert_index, "skipped unparseable cert");
                                         job_counter_parse_failures.increment(1);
+                                        // Nothing will ever be published for
+                                        // this index, so settle it or the
+                                        // durable position stops here.
+                                        skipped.push(cert_index);
                                         continue;
                                     }
                                 };
 
-                                if !job_dedup.is_new(&parsed.leaf_cert.sha256_raw) {
+                                let is_new = job_dedup.is_new(&parsed.leaf_cert.sha256_raw);
+                                if !is_new && !job_durable {
                                     continue;
                                 }
 
                                 // Deferred chain parsing: only for entries that
-                                // passed dedup, and only when the `full` stream —
-                                // the sole consumer of `chain` — is enabled.
-                                let chain = full_stream_enabled.then(|| parsed.parse_chain());
+                                // reach a subscriber, and only when the `full`
+                                // stream — the sole consumer of `chain` — is
+                                // enabled.
+                                let chain =
+                                    (is_new && full_stream_enabled).then(|| parsed.parse_chain());
 
                                 let seen = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
-                                // Issue #2: wrap in Arc once; share between CachedCert and CertificateData.
+                                newest_submission =
+                                    newest_submission.max(parsed.submission_timestamp);
+                                // Wrapped once and shared with the cache entry.
                                 let leaf = Arc::new(parsed.leaf_cert);
                                 let cached = build_cached_cert(
                                     Arc::clone(&leaf),
@@ -727,17 +782,33 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                                         seen,
                                         submission_timestamp: parsed.submission_timestamp,
                                         source: Arc::clone(&job_source),
+                                        verification: job_verification,
                                     },
                                 };
-                                broadcast_cert(
-                                    msg,
-                                    &job_tx,
-                                    &job_cache,
-                                    cached,
-                                    &job_stats,
-                                    &job_counter_messages,
-                                    &job_streams,
-                                );
+                                // Published before the live dedup is applied.
+                                // Dedup collapses one certificate seen in
+                                // several logs, but a durable record is
+                                // addressed by (log_id, index) — each log's
+                                // entry is a distinct record, and dropping the
+                                // second one would leave a permanent hole in
+                                // that log's position. JetStream deduplicates
+                                // identical republishes by message id.
+                                if job_durable {
+                                    match msg.to_v2_json() {
+                                        Ok(json) => durable.push(crate::nats::Record {
+                                            log_url: Arc::clone(&job_log_url),
+                                            msg_id: format!("{job_log_key}:{cert_index}"),
+                                            index: cert_index,
+                                            subject: job_nats_subject.clone(),
+                                            payload: bytes::Bytes::from(json),
+                                        }),
+                                        Err(_) => skipped.push(cert_index),
+                                    }
+                                }
+
+                                if is_new {
+                                    broadcast_cert(msg, cached, &targets);
+                                }
                             }
 
                             // Checkpoint INSIDE the job: if the supervisor's
@@ -746,6 +817,12 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                             // blocking task still runs to completion — the
                             // broadcasts above and this index persist stay
                             // atomic, so a restart doesn't replay the batch.
+                            crate::ct::record_ingest_delay(
+                                &job_log_name,
+                                newest_submission,
+                                chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
+                            );
+
                             let next_index = max_index_seen + 1;
                             job_state_manager.update_index(&job_base_url, next_index, tree_size);
                             job_tracker.update(
@@ -755,9 +832,9 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                                 tree_size,
                                 job_health.total_errors(),
                             );
-                            max_index_seen
+                            (max_index_seen, durable, skipped)
                         });
-                        let max_index_seen = match join.await {
+                        let (max_index_seen, durable, skipped) = match join.await {
                             Ok(v) => v,
                             // Re-raise worker panics so the supervisor's
                             // catch_unwind recovery path in main.rs still fires.
@@ -765,6 +842,19 @@ pub async fn run_watcher_with_cache(log: CtLog, ctx: WatcherContext) {
                             // Cancelled (runtime shutdown) — bail out quietly.
                             Err(_) => break 'drain,
                         };
+
+                        // Queued after the broadcast, awaited before the next
+                        // window: under `on_full: block` this is where ingest
+                        // slows to match durable storage.
+                        if let Some(sink) = &nats {
+                            let log_key: Arc<str> = Arc::from(base_url.as_str());
+                            for index in skipped {
+                                sink.acks.record_skipped(&log_key, index);
+                            }
+                            for record in durable {
+                                sink.publish(record).await;
+                            }
+                        }
 
                         debug!(log = %log_name, count = count, "fetched entries");
                         current_index = max_index_seen + 1;

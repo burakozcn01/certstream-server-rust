@@ -1,5 +1,130 @@
 # Release Notes
 
+## v1.6.0: Verification, filtering, and durable output
+
+**Release date:** September 5, 2026
+
+This release adds server-side stream filtering, optional Merkle verification for static-CT logs, versioned v2 output, live CT log-list refresh, JetStream output, names-tile support, historical backfill, and improved subscriber-loss and freshness reporting.
+
+### Server-side subscription filters
+
+WebSocket and SSE endpoints now accept `domain` and `issuer` query parameters.
+
+Domain matching respects DNS label boundaries. For example, `example.com` matches `example.com`, `www.example.com`, and `*.example.com`, but not `notexample.com`.
+
+Subscribers with identical filters share a subscription group. Filters are evaluated once per certificate for the group, and the serialized payload is reused across its subscribers. When there are no filtered subscribers, no filtering work is performed.
+
+### Static-CT Merkle verification
+
+`CERTSTREAM_STATIC_CT_MERKLE_VERIFICATION` enables Merkle verification against static-CT hash tiles.
+
+Available modes:
+
+* `consistency`: verifies that each new checkpoint extends the previous tree.
+* `full`: additionally verifies inclusion of each ingested entry in the signed tree.
+
+Verification is disabled by default.
+
+Unavailable or incomplete tiles are treated as unverifiable rather than invalid. HTTP 429 responses and partial tiles that are no longer served result in `inclusion: unverified`; delivery continues. Entries are rejected only when a returned hash conflicts with the expected tree.
+
+Verification requests use the existing per-operator rate limiter.
+
+### Version 2 output
+
+A versioned output format is available through:
+
+* WebSocket: `/v2`
+* SSE: `/sse?stream=v2`
+
+The v2 stream is disabled by default and includes:
+
+* CT log ID
+* entry index
+* entry type
+* observation time
+* verification status
+
+`(log_id, index)` identifies the record at its source. The certificate SHA-256 fingerprint identifies the certificate itself.
+
+Existing v1 output formats are unchanged.
+
+### Live log-list refresh
+
+The CT log catalog is now refreshed hourly.
+
+New logs can be discovered without restarting the server. Existing watchers are matched by CT log ID, so their state is preserved if a catalog entry changes URL.
+
+A failed refresh, or one that resolves no logs, leaves the current watcher set unchanged.
+
+User-defined `custom_logs` and `static_logs` are never removed by catalog refresh.
+
+### NATS JetStream output
+
+`CERTSTREAM_NATS_ENABLED=true` enables publishing to NATS JetStream.
+
+Watcher state advances according to acknowledged JetStream writes rather than completed reads. After a restart, entries that were read but not durably acknowledged are replayed.
+
+Records use:
+
+```text
+Nats-Msg-Id: <log_id>:<index>
+```
+
+This allows JetStream to deduplicate replayed entries.
+
+The stream uses `discard: new`, so a full stream rejects new writes instead of deleting existing unread records.
+
+### Names tiles
+
+`CERTSTREAM_STATIC_CT_NAMES_TILES=prefer` enables the Sunlight names-tiles extension on compatible static-CT logs.
+
+Names tiles are significantly smaller than the corresponding data tiles and do not require X.509 parsing.
+
+Because names-tile data is unauthenticated and cannot be verified for inclusion, entries produced from this path are published as:
+
+```text
+dns_entries_unauthenticated
+```
+
+### Historical backfill
+
+A fixed CT log index range can now be replayed to JSONL:
+
+```bash
+certstream-server-rust --backfill --log <id> --start N --end M --out file.jsonl
+```
+
+The requested range is fixed before fetching begins. Backfill does not read or modify the live watcher state file.
+
+### Subscriber loss reporting
+
+SSE no longer drops lagged messages silently.
+
+Message gaps are emitted as named `gap` events, and both WebSocket and SSE track subscriber losses.
+
+The slow-client policy now uses a rolling window. A subscriber may miss up to 1000 messages within 60 seconds before being disconnected.
+
+This replaces the previous consecutive-lag counter, which reset after every successful send and could allow continuously lagging clients to remain connected.
+
+### Freshness metrics
+
+Added:
+
+```text
+certstream_ct_log_ingest_delay_seconds
+```
+
+This reports the age of the newest entry delivered by each watcher, providing a measure of ingest freshness in addition to entry-count lag.
+
+`soak/measure.sh` now samples this metric alongside CPU, RSS, and subscriber-loss metrics.
+
+### Fixes
+
+* Failed WebSocket handshakes no longer leak connection-limit slots. The slot is released if the upgrade does not complete.
+
+* `ct_log.state_recovery: fail` now refuses startup when the state file is unreadable instead of restarting watchers from the current log head. The default `fresh` behavior is unchanged.
+
+
 ## v1.5.6: Distribution
 
 **Release date:** August 25, 2026

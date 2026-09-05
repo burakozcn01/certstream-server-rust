@@ -1,12 +1,16 @@
 mod api;
+mod backfill;
 mod cli;
 mod config;
 mod ct;
 mod dedup;
+mod filter;
 mod health;
 mod hot_reload;
+mod lag_policy;
 mod memstats;
 mod middleware;
+mod nats;
 mod models;
 mod rate_limit;
 mod sse;
@@ -22,7 +26,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any as CorsAny, CorsLayer};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use api::{ApiState, CertificateCache, LogTracker, ServerStats};
@@ -37,7 +41,10 @@ use models::PreSerializedMessage;
 use rate_limit::RateLimiter;
 use sse::handle_sse_stream;
 use state::StateManager;
-use websocket::{handle_domains_only, handle_full_stream, handle_lite_stream, AppState, ConnectionCounter};
+use websocket::{
+    handle_domains_only, handle_full_stream, handle_lite_stream, handle_v2_stream, AppState,
+    ConnectionCounter,
+};
 
 // The workload alloc/frees multi-MB tile and batch buffers across ~100 watcher
 // tasks every poll. The system allocator (macOS malloc / glibc) keeps those
@@ -132,7 +139,7 @@ async fn main() {
     // Always validate on normal startup too — `--validate-config` is opt-in
     // and most operators don't run it. Without this, an invalid `buffer_size:
     // 0` would reach `broadcast::channel(0)` and panic on a fresh boot.
-    // (P0 fix.) `--export-metrics` and `--dry-run` are still allowed to skip
+    // `--export-metrics` and `--dry-run` are still allowed to skip
     // because they're operator probes, not real servers.
     if !cli_args.export_metrics && let Err(errors) = config.validate() {
         eprintln!("Configuration validation failed:");
@@ -154,6 +161,10 @@ async fn main() {
         metrics::counter!("certstream_log_health_checks_failed").increment(0);
         metrics::counter!("certstream_duplicates_filtered").increment(0);
         metrics::counter!("certstream_static_ct_checkpoint_errors").increment(0);
+        metrics::counter!("certstream_ws_messages_lagged").increment(0);
+        metrics::counter!("certstream_ws_disconnect_lag").increment(0);
+        metrics::counter!("certstream_sse_messages_lagged").increment(0);
+        metrics::counter!("certstream_sse_disconnect_lag").increment(0);
         println!("{}", prometheus_handle.render());
         return;
     }
@@ -185,15 +196,30 @@ async fn main() {
     metrics::counter!("certstream_log_health_checks_failed").increment(0);
     metrics::counter!("certstream_duplicates_filtered").increment(0);
     metrics::counter!("certstream_static_ct_checkpoint_errors").increment(0);
+    // Subscriber-side losses. Zero here is a real answer ("nobody missed
+    // anything"), and without the pre-init it is indistinguishable from
+    // "this build never reports it".
+    metrics::counter!("certstream_ws_messages_lagged").increment(0);
+    metrics::counter!("certstream_ws_disconnect_lag").increment(0);
+    metrics::counter!("certstream_sse_messages_lagged").increment(0);
+    metrics::counter!("certstream_sse_disconnect_lag").increment(0);
 
-    // No placeholder Receiver here. The pre-1.5.0 version bound `_rx` which
-    // stayed alive for the whole process — that kept `tx.receiver_count()` at
-    // ≥1 forever and silently defeated the idle-server pre-serialize guard
-    // (#13). `tx.send()` returning `Err(SendError)` on zero subscribers is
-    // already ignored downstream (`let _ = tx.send(...)`), so no placeholder
-    // is needed for correctness.
+    // The receiver is dropped deliberately. Holding one for the process
+    // lifetime would keep `tx.receiver_count()` above zero forever and defeat
+    // the guard that skips serialization when nobody is listening. `send()`
+    // returning `Err(SendError)` with no subscribers is already ignored
+    // downstream, so nothing needs the placeholder.
     let tx: broadcast::Sender<Arc<PreSerializedMessage>> =
         broadcast::channel(config.buffer_size).0;
+
+    // Server-side subscription filters. Dormant — and free — until the first
+    // filtered subscriber connects.
+    let filter_hub = filter::FilterHub::new(tx.clone());
+
+    if let Some(request) = cli_args.backfill.clone() {
+        run_backfill(request, &config).await;
+        return;
+    }
 
     let user_agent = match config.ct_log.user_agent_override() {
         Some(ua) => {
@@ -212,13 +238,44 @@ async fn main() {
         .expect("failed to build http client");
     let transport = OperatorTransport::new(&config.ct_log, &user_agent);
 
-    let state_manager = StateManager::new(config.ct_log.state_file.clone());
+    let state_manager = match StateManager::new(
+        config.ct_log.state_file.clone(),
+        config.ct_log.state_recovery,
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            error!(error = %e, "refusing to start with an unusable state file");
+            eprintln!("State recovery failed: {e}");
+            eprintln!("Set ct_log.state_recovery: fresh to start from the log head instead.");
+            std::process::exit(1);
+        }
+    };
     if config.ct_log.state_file.is_some() {
         state_manager
             .clone()
             .start_periodic_save(Duration::from_secs(30), shutdown_token.clone());
         info!("state persistence enabled");
     }
+
+    // Durable output. Started before the watchers so a broker that is down at
+    // boot is a startup failure the operator sees, not a silent fallback to a
+    // non-durable server.
+    let nats_sink = if config.nats.enabled {
+        match nats::start(&config.nats, shutdown_token.clone()).await {
+            Ok(sink) => {
+                state_manager.gate_saves_on_acks(sink.acks.clone());
+                info!("state saves now follow NATS acknowledgements");
+                Some(sink)
+            }
+            Err(e) => {
+                nats::report_start_failure(&e);
+                eprintln!("NATS JetStream output is enabled but could not be started: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
 
     let hot_reload_manager = if config.hot_reload.enabled {
         let initial_hot_config = HotReloadableConfig {
@@ -286,6 +343,9 @@ async fn main() {
     if !config.streams.domains_only {
         info!("domains-only stream disabled by config");
     }
+    if config.streams.v2 {
+        info!("v2 stream enabled");
+    }
 
     // Single issuer cache shared across all static-CT watchers.
     let issuer_cache = Arc::new(ct::static_ct::IssuerCache::new());
@@ -301,19 +361,37 @@ async fn main() {
             tracker: log_tracker.clone(),
             shutdown: shutdown_token.clone(),
             dedup: dedup_filter.clone(),
+            filters: filter_hub.clone(),
+            nats: nats_sink.clone(),
             rate_limiter: None,
             streams: streams.clone(),
             issuer_cache: issuer_cache.clone(),
         };
 
+        let pool = Arc::new(parking_lot::Mutex::new(WatcherPool::default()));
         let (rfc_count, static_count) =
-            discover_and_spawn(&config, &log_tracker, &watcher_ctx, &transport).await;
+            discover_and_spawn(&config, &log_tracker, &watcher_ctx, &transport, &pool).await;
 
         if rfc_count == 0 && static_count == 0 {
             error!("no CT log watchers were started — refusing to run with zero sources");
             std::process::exit(1);
         }
         info!(rfc6962 = rfc_count, static_ct = static_count, "CT watcher pool started");
+
+        let refresh_secs = config.ct_log.log_refresh_interval_secs;
+        if refresh_secs == 0 {
+            info!("periodic log list refresh disabled");
+        } else {
+            info!(interval_secs = refresh_secs, "periodic log list refresh enabled");
+            spawn_log_refresh(
+                Arc::new(config.clone()),
+                log_tracker.clone(),
+                watcher_ctx.clone(),
+                transport.clone(),
+                pool,
+                Duration::from_secs(refresh_secs),
+            );
+        }
     } else {
         info!("dry-run mode: skipping CT log connections");
     }
@@ -371,6 +449,7 @@ async fn main() {
         &config,
         RouterDeps {
             tx: tx.clone(),
+            filter_hub: filter_hub.clone(),
             connection_limiter: connection_limiter.clone(),
             server_stats: server_stats.clone(),
             cert_cache: cert_cache.clone(),
@@ -452,11 +531,12 @@ fn build_ct_client(
 ) -> reqwest::Result<Client> {
     let builder = Client::builder()
         .user_agent(user_agent)
-        // Pre-1.5.0 kept 20 idle connections per host × 55 hosts = 1100
-        // hot TCP sockets, ~40-55 MiB of kernel + TLS state per process.
-        // Watchers now pipeline up to `fetch_concurrency` range/tile fetches
-        // during catch-up, so keep that many idle connections per host (with
-        // HTTP/2 they multiplex over fewer; this matters for HTTP/1.1 hosts).
+        // Sized to what a watcher actually pipelines: it keeps up to
+        // `fetch_concurrency` range/tile fetches in flight during catch-up.
+        // reqwest's default of 20 per host across ~55 hosts would hold an
+        // order of magnitude more idle sockets, with their kernel and TLS
+        // state, than any of them use. Matters most for HTTP/1.1 hosts;
+        // HTTP/2 multiplexes over fewer connections anyway.
         .pool_max_idle_per_host((ct_log.fetch_concurrency as usize).max(2))
         .pool_idle_timeout(Duration::from_secs(30))
         // Global timeout for catalog list/signature fetches. Watcher fetches
@@ -483,6 +563,7 @@ fn build_ct_client(
 /// Same observation as certspotter's `digicerthack` branch
 /// (<https://github.com/SSLMate/certspotter/issues/126>), which drops
 /// keep-alives outright instead.
+#[derive(Clone)]
 struct OperatorTransport {
     /// `None` when no operator is listed, or when the client failed to build.
     client: Option<Client>,
@@ -550,18 +631,53 @@ fn unmatched_operator_keys<'a>(
 }
 
 /// Discovery + spawn pipeline. Returns `(rfc6962_count, static_ct_count)`.
-async fn discover_and_spawn(
-    config: &Config,
-    log_tracker: &Arc<LogTracker>,
-    ctx: &WatcherContext,
-    transport: &OperatorTransport,
-) -> (usize, usize) {
-    use std::collections::HashMap;
-    use ct::{LogType, OperatorRateLimiter};
+/// Identity a refreshed log list is diffed against the running watchers by.
+///
+/// `log_id` is the SHA-256 of the log's public key, so it survives a URL
+/// change and is the same across every catalog that lists the log. A log
+/// whose list entry carries no id can only be matched on its URL.
+fn watcher_key(log: &ct::CtLog) -> String {
+    match log.log_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(id) => format!("id:{id}"),
+        None => format!("url:{}", log.normalized_url()),
+    }
+}
+
+struct RunningWatcher {
+    /// Child of the process shutdown token, so cancelling this stops one
+    /// watcher and cancelling the parent still stops them all.
+    cancel: CancellationToken,
+    name: String,
+    url: String,
+    local: bool,
+}
+
+/// The set of watchers currently running, and the per-operator limiters they
+/// share. Refresh diffs a freshly resolved log list against `running`.
+#[derive(Default)]
+struct WatcherPool {
+    running: std::collections::HashMap<String, RunningWatcher>,
+    operator_limiters: std::collections::HashMap<String, ct::OperatorRateLimiter>,
+}
+
+/// Fetch the catalogs and merge in the locally configured logs.
+///
+/// Returns an error where startup would refuse to run, instead of exiting:
+/// this also runs on a live server, where a bad refresh must leave the
+/// existing watchers alone rather than take the process down.
+/// A resolved log set, and which of its entries came from this server's own
+/// config rather than from a catalog. Always produced and consumed together.
+struct ResolvedLogs {
+    logs: Vec<ct::CtLog>,
+    local_keys: std::collections::HashSet<String>,
+}
+
+async fn resolve_logs(config: &Config, ctx: &WatcherContext) -> Result<ResolvedLogs, String> {
+    use ct::LogType;
 
     // Drive the signed-catalog registry. Per-source authority comes from
     // ct_log.catalog_authority_overrides; signature verification gates auto-spawn.
-    let discovered = fetch_log_list(
+    let mut all_logs = fetch_log_list(
         &ctx.client,
         &ct::catalog::catalog_registry(),
         &config.ct_log.catalog_authority_overrides,
@@ -569,15 +685,8 @@ async fn discover_and_spawn(
         Duration::from_secs(config.ct_log.request_timeout_secs),
         ctx.config.user_agent_override().unwrap_or(DEFAULT_USER_AGENT),
     )
-    .await;
-
-    let mut all_logs = match discovered {
-        Ok(v) => v,
-        Err(e) => {
-            error!(error = %e, "failed to fetch any CT log list");
-            Vec::new()
-        }
-    };
+    .await
+    .map_err(|e| format!("failed to fetch any CT log list: {e}"))?;
 
     // Splice in configured static logs by expected CT log ID when provided.
     // A configured static log with the same CT log ID as a discovered log
@@ -595,8 +704,7 @@ async fn discover_and_spawn(
         for conflict in &conflicts {
             error!("{conflict}");
         }
-        error!("static log override conflicts with discovered CT log identity; refusing to start");
-        std::process::exit(1);
+        return Err("static log override conflicts with discovered CT log identity".to_string());
     }
     let override_ids: std::collections::HashSet<String> = static_overrides
         .iter()
@@ -618,6 +726,15 @@ async fn discover_and_spawn(
             && override_urls_without_id.contains(&l.normalized_url());
         !(replaced_by_id || replaced_by_url)
     });
+
+    // Everything the operator configured by hand. A catalog that stops
+    // listing one of these says nothing about it, so refresh never retires it.
+    let mut local_keys: std::collections::HashSet<String> =
+        static_overrides.iter().map(watcher_key).collect();
+    for custom in &config.custom_logs {
+        local_keys.insert(watcher_key(&ct::CtLog::from(custom.clone())));
+    }
+
     all_logs.extend(static_overrides);
 
     {
@@ -628,11 +745,18 @@ async fn discover_and_spawn(
             .filter(|id| !seen.insert(id.clone()))
             .collect();
         if !duplicates.is_empty() {
-            error!(duplicate_log_ids = ?duplicates, "multiple CT watchers resolved to the same log_id; refusing to start");
-            std::process::exit(1);
+            error!(duplicate_log_ids = ?duplicates, "multiple CT watchers resolved to the same log_id");
+            return Err("multiple CT watchers resolved to the same log_id".to_string());
         }
     }
 
+    Ok(ResolvedLogs {
+        logs: all_logs,
+        local_keys,
+    })
+}
+
+fn warn_unmatched_operators(config: &Config, all_logs: &[ct::CtLog]) {
     let known_operators: std::collections::HashSet<String> = all_logs
         .iter()
         .map(|log| ct::normalize_operator(&log.operator))
@@ -655,40 +779,297 @@ async fn discover_and_spawn(
             );
         }
     }
+}
+
+/// Bring the running watcher set in line with `all_logs`: start one for every
+/// log that has none, and apply the removal policy to the rest.
+/// Returns (rfc6962 running, static-ct running, started, stopped).
+fn reconcile_pool(
+    pool: &mut WatcherPool,
+    resolved: ResolvedLogs,
+    config: &Config,
+    log_tracker: &Arc<LogTracker>,
+    ctx: &WatcherContext,
+    transport: &OperatorTransport,
+    stagger: bool,
+) -> (usize, usize, usize, usize) {
+    use ct::LogType;
+
+    let ResolvedLogs { logs, local_keys } = resolved;
+    let local_keys = &local_keys;
+    let present: std::collections::HashSet<String> = logs.iter().map(watcher_key).collect();
 
     // Partition by type — the two watcher pools differ in protocol.
     let (rfc_logs, static_logs): (Vec<_>, Vec<_>) =
-        all_logs.into_iter().partition(|l| l.log_type == LogType::Rfc6962);
+        logs.into_iter().partition(|l| l.log_type == LogType::Rfc6962);
 
-    let mut operator_limiters: HashMap<String, OperatorRateLimiter> = HashMap::new();
+    let rfc_total = rfc_logs.len();
+    let static_total = static_logs.len();
 
-    let rfc_count = spawn_pool(
+    let rfc_started = spawn_pool(
         "RFC 6962",
         config.ct_log.rfc6962_enabled,
         rfc_logs,
         log_tracker,
         ctx,
         transport,
-        &mut operator_limiters,
+        pool,
+        local_keys,
         "certstream_ct_logs_count",
-        50,
+        if stagger { 50 } else { 0 },
         WorkerKind::Rfc6962,
     );
 
-    let static_count = spawn_pool(
+    let static_started = spawn_pool(
         "static-ct-api",
         config.ct_log.static_ct_enabled,
         static_logs,
         log_tracker,
         ctx,
         transport,
-        &mut operator_limiters,
+        pool,
+        local_keys,
         "certstream_static_ct_logs_count",
-        100,
+        if stagger { 100 } else { 0 },
         WorkerKind::StaticCt,
     );
 
-    (rfc_count, static_count)
+    let stopped = retire_absent(
+        pool,
+        &present,
+        config.ct_log.removed_log_policy,
+        log_tracker,
+    );
+
+    (
+        if config.ct_log.rfc6962_enabled { rfc_total } else { 0 },
+        if config.ct_log.static_ct_enabled { static_total } else { 0 },
+        rfc_started + static_started,
+        stopped,
+    )
+}
+
+/// Stop the watchers whose logs the refreshed list no longer carries.
+fn retire_absent(
+    pool: &mut WatcherPool,
+    present: &std::collections::HashSet<String>,
+    policy: config::RemovedLogPolicy,
+    log_tracker: &LogTracker,
+) -> usize {
+    let mut stopped = 0;
+    pool.running.retain(|key, watcher| {
+        if present.contains(key) || watcher.local {
+            return true;
+        }
+        if policy == config::RemovedLogPolicy::Keep {
+            debug!(log = %watcher.name, "log delisted; keeping the watcher per policy");
+            return true;
+        }
+        info!(log = %watcher.name, "log delisted from the catalog, stopping its watcher");
+        watcher.cancel.cancel();
+        log_tracker.deregister(&watcher.url);
+        stopped += 1;
+        false
+    });
+    if stopped > 0 {
+        metrics::counter!("certstream_log_refresh_removed_total").increment(stopped as u64);
+    }
+    stopped
+}
+
+async fn discover_and_spawn(
+    config: &Config,
+    log_tracker: &Arc<LogTracker>,
+    ctx: &WatcherContext,
+    transport: &OperatorTransport,
+    pool: &parking_lot::Mutex<WatcherPool>,
+) -> (usize, usize) {
+    // Resolved before the lock is taken: the pool guard must never be held
+    // across an await.
+    let resolved = match resolve_logs(config, ctx).await {
+        Ok(v) => v,
+        Err(e) => {
+            error!(error = %e, "CT log discovery failed");
+            // Startup keeps its old contract: a resolvable-identity conflict
+            // is fatal, an empty list falls through to the zero-sources check.
+            if e.contains("conflicts") || e.contains("same log_id") {
+                std::process::exit(1);
+            }
+            ResolvedLogs {
+                logs: Vec::new(),
+                local_keys: std::collections::HashSet::new(),
+            }
+        }
+    };
+
+    warn_unmatched_operators(config, &resolved.logs);
+    let (rfc, static_ct, _, _) = reconcile_pool(
+        &mut pool.lock(),
+        resolved,
+        config,
+        log_tracker,
+        ctx,
+        transport,
+        true,
+    );
+    (rfc, static_ct)
+}
+
+/// Re-resolve the log list on an interval and reconcile the watcher pool
+/// against it, so a log added to the catalog is picked up by a server that
+/// has been up for months.
+///
+/// A refresh that cannot resolve a list changes nothing: the running watchers
+/// are the last known-good set, and losing the catalog for an hour is not a
+/// reason to stop reading the logs it named.
+fn spawn_log_refresh(
+    config: Arc<Config>,
+    log_tracker: Arc<LogTracker>,
+    ctx: WatcherContext,
+    transport: OperatorTransport,
+    pool: Arc<parking_lot::Mutex<WatcherPool>>,
+    interval: Duration,
+) {
+    let cancel = ctx.shutdown.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await; // the first tick fires immediately; discovery just ran
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tick.tick() => {}
+            }
+
+            metrics::counter!("certstream_log_refresh_total").increment(1);
+            let resolved = match resolve_logs(&config, &ctx).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(error = %e, "log list refresh failed; keeping the running watchers");
+                    metrics::counter!("certstream_log_refresh_failures_total").increment(1);
+                    continue;
+                }
+            };
+
+            // A resolve that yields nothing is a broken catalog, not an
+            // ecosystem with no CT logs. Retiring every watcher on it would
+            // turn a transient fetch problem into an outage.
+            if resolved.logs.is_empty() {
+                warn!("log list refresh resolved zero logs; keeping the running watchers");
+                metrics::counter!("certstream_log_refresh_failures_total").increment(1);
+                continue;
+            }
+
+            let (rfc, static_ct, started, stopped) = reconcile_pool(
+                &mut pool.lock(),
+                resolved,
+                &config,
+                &log_tracker,
+                &ctx,
+                &transport,
+                false,
+            );
+
+            metrics::gauge!("certstream_log_refresh_last_success_timestamp")
+                .set(chrono::Utc::now().timestamp() as f64);
+            if started > 0 || stopped > 0 {
+                info!(
+                    added = started,
+                    removed = stopped,
+                    rfc6962 = rfc,
+                    static_ct,
+                    "log list refreshed"
+                );
+            } else {
+                debug!(rfc6962 = rfc, static_ct, "log list refreshed, no changes");
+            }
+        }
+        info!("log refresh task stopping");
+    });
+}
+
+/// `--backfill`: replay one log's index range to JSONL and exit.
+///
+/// Runs the same discovery the server does, so a log can be named the way an
+/// operator knows it, then hands off to the batch reader. It builds no
+/// watchers, opens no channel, and never writes the live state file.
+async fn run_backfill(request: Result<cli::BackfillArgs, String>, config: &Config) {
+    let args = match request {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+
+    let user_agent = config
+        .ct_log
+        .user_agent_override()
+        .unwrap_or(DEFAULT_USER_AGENT)
+        .to_string();
+    let client = match build_ct_client(&config.ct_log, &user_agent, false) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("failed to build http client: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let logs = match fetch_log_list(
+        &client,
+        &ct::catalog::catalog_registry(),
+        &config.ct_log.catalog_authority_overrides,
+        config.custom_logs.clone(),
+        Duration::from_secs(config.ct_log.request_timeout_secs),
+        &user_agent,
+    )
+    .await
+    {
+        Ok(mut discovered) => {
+            discovered.extend(config.static_logs.iter().cloned().map(ct::CtLog::from));
+            discovered
+        }
+        Err(e) => {
+            eprintln!("failed to fetch the CT log list: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let target = match backfill::resolve_target(&logs, &args.log) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+
+    let report = backfill::run(
+        backfill::BackfillRequest {
+            start: args.start,
+            end: args.end,
+            out: args.out.map(std::path::PathBuf::from),
+        },
+        target,
+        &config.ct_log,
+        &client,
+    )
+    .await;
+
+    match report {
+        Ok(r) => {
+            eprintln!(
+                "backfill complete: {} of {} entries written, {} unparseable, {} fetch failures",
+                r.written, r.requested, r.unparseable, r.fetch_failures
+            );
+            if r.fetch_failures > 0 {
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("backfill failed: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -706,9 +1087,10 @@ impl WorkerKind {
     }
 }
 
-/// Register a pool of watchers, attach per-operator rate limiters, and spawn
-/// each worker behind a restart-on-panic supervisor. Returns the number of
-/// workers actually spawned (0 if the pool is disabled by config).
+/// Start a watcher for every log in `logs` that has none yet, attaching the
+/// per-operator rate limiter it shares with the other logs of its operator.
+/// Logs already running are left untouched — that is what preserves their
+/// position across a refresh. Returns the number newly started.
 #[allow(clippy::too_many_arguments)]
 fn spawn_pool(
     family: &'static str,
@@ -717,7 +1099,8 @@ fn spawn_pool(
     log_tracker: &Arc<LogTracker>,
     ctx: &WatcherContext,
     transport: &OperatorTransport,
-    operator_limiters: &mut std::collections::HashMap<String, ct::OperatorRateLimiter>,
+    pool: &mut WatcherPool,
+    local_keys: &std::collections::HashSet<String>,
     count_gauge: &'static str,
     startup_stagger_ms: u64,
     kind: WorkerKind,
@@ -728,14 +1111,22 @@ fn spawn_pool(
         return 0;
     }
 
-    info!(count = logs.len(), family, "found CT logs");
     metrics::gauge!(count_gauge).set(logs.len() as f64);
 
-    for log in &logs {
+    let fresh: Vec<ct::CtLog> = logs
+        .into_iter()
+        .filter(|log| !pool.running.contains_key(&watcher_key(log)))
+        .collect();
+    if fresh.is_empty() {
+        return 0;
+    }
+    info!(count = fresh.len(), family, "starting CT log watchers");
+
+    for log in &fresh {
         // Key by canonical operator name and resolve the interval from config
         // instead of a hardcoded shared default.
         let op = ct::normalize_operator(&log.operator);
-        operator_limiters.entry(op.clone()).or_insert_with(|| {
+        pool.operator_limiters.entry(op.clone()).or_insert_with(|| {
             let ms = ctx
                 .config
                 .operator_rate_limits
@@ -752,15 +1143,16 @@ fn spawn_pool(
         log_tracker.register(
             log.description.clone(),
             log.normalized_url(),
-            log.operator.clone(),
+            log.operator_name().to_string(),
         );
     }
 
-    let count = logs.len();
-    for (index, log) in logs.into_iter().enumerate() {
+    let count = fresh.len();
+    for (index, log) in fresh.into_iter().enumerate() {
+        let key = watcher_key(&log);
         let mut wctx = ctx.clone();
         let operator_key = ct::normalize_operator(&log.operator);
-        wctx.rate_limiter = operator_limiters.get(&operator_key).cloned();
+        wctx.rate_limiter = pool.operator_limiters.get(&operator_key).cloned();
         wctx.client = transport.client_for(&operator_key, &ctx.client).clone();
         // Catalog-discovered logs share the global config. Local custom/static
         // entries with per-log overrides get their own resolved config.
@@ -774,6 +1166,20 @@ fn spawn_pool(
             }
             wctx.config = Arc::new(cfg);
         }
+        // A child token so a refresh can retire this one watcher, while the
+        // process shutdown token still stops every watcher at once.
+        let cancel = ctx.shutdown.child_token();
+        wctx.shutdown = cancel.clone();
+
+        pool.running.insert(
+            key.clone(),
+            RunningWatcher {
+                cancel,
+                name: log.description.clone(),
+                url: log.normalized_url(),
+                local: local_keys.contains(&key),
+            },
+        );
         spawn_worker_loop(log, wctx, startup_stagger_ms * index as u64, kind);
     }
     count
@@ -825,6 +1231,7 @@ fn spawn_worker_loop(log: ct::CtLog, ctx: WatcherContext, startup_delay_ms: u64,
 /// Dependencies needed to build the HTTP router.
 struct RouterDeps {
     tx: broadcast::Sender<Arc<PreSerializedMessage>>,
+    filter_hub: Arc<filter::FilterHub>,
     connection_limiter: Arc<ConnectionLimiter>,
     server_stats: Arc<ServerStats>,
     cert_cache: Arc<CertificateCache>,
@@ -839,6 +1246,7 @@ struct RouterDeps {
 fn build_router(protocols: &config::ProtocolConfig, config: &Config, deps: RouterDeps) -> Router {
     let RouterDeps {
         tx,
+        filter_hub,
         connection_limiter,
         server_stats,
         cert_cache,
@@ -851,6 +1259,7 @@ fn build_router(protocols: &config::ProtocolConfig, config: &Config, deps: Route
     } = deps;
     let streams = Arc::new(config.streams.clone());
     let state = Arc::new(AppState {
+        filters: filter_hub,
         tx: tx.clone(),
         connections: ConnectionCounter::new(),
         limiter: connection_limiter.clone(),
@@ -917,6 +1326,9 @@ fn build_router(protocols: &config::ProtocolConfig, config: &Config, deps: Route
         }
         if streams.domains_only {
             ws_router = ws_router.route("/domains-only", get(handle_domains_only));
+        }
+        if streams.v2 {
+            ws_router = ws_router.route("/v2", get(handle_v2_stream));
         }
         let ws_router = ws_router.with_state(state.clone());
         protected_app = protected_app.merge(ws_router);
@@ -1127,6 +1539,172 @@ fn print_config_validation(config: &Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use config::RemovedLogPolicy;
+    use std::collections::{HashMap, HashSet};
+
+    fn test_log(description: &str, url: &str, log_id: Option<&str>) -> ct::CtLog {
+        ct::CtLog::from(config::CustomCtLog {
+            name: description.to_string(),
+            url: url.to_string(),
+            expected_log_id: log_id.map(str::to_string),
+            batch_size: None,
+            poll_interval_ms: None,
+        })
+    }
+
+    fn running(pool: &mut WatcherPool, key: &str, url: &str, local: bool) -> CancellationToken {
+        let cancel = CancellationToken::new();
+        pool.running.insert(
+            key.to_string(),
+            RunningWatcher {
+                cancel: cancel.clone(),
+                name: key.to_string(),
+                url: url.to_string(),
+                local,
+            },
+        );
+        cancel
+    }
+
+    /// A log's identity across refreshes is its key hash, not its URL: an
+    /// operator that moves a log to a new hostname must not look like one log
+    /// leaving and a different one arriving.
+    #[test]
+    fn watcher_key_prefers_the_log_id_over_the_url() {
+        let before = test_log("Argon", "https://ct.example.com/2026h1/", Some("abc123="));
+        let after = test_log("Argon", "https://ct2.example.com/2026h1/", Some("abc123="));
+        assert_eq!(watcher_key(&before), watcher_key(&after));
+        assert_eq!(watcher_key(&before), "id:abc123=");
+    }
+
+    #[test]
+    fn watcher_key_falls_back_to_the_normalized_url() {
+        let no_id = test_log("Local", "ct.example.com/log/", None);
+        let empty_id = test_log("Local", "https://ct.example.com/log", Some(""));
+        assert_eq!(watcher_key(&no_id), "url:https://ct.example.com/log");
+        assert_eq!(watcher_key(&no_id), watcher_key(&empty_id));
+    }
+
+    #[test]
+    fn retire_absent_stops_only_delisted_catalog_logs() {
+        let tracker = LogTracker::new();
+        let mut pool = WatcherPool::default();
+        let kept = running(&mut pool, "id:still-listed", "https://a.example", false);
+        let gone = running(&mut pool, "id:delisted", "https://b.example", false);
+
+        let present = HashSet::from(["id:still-listed".to_string()]);
+        let stopped = retire_absent(&mut pool, &present, RemovedLogPolicy::Stop, &tracker);
+
+        assert_eq!(stopped, 1);
+        assert!(gone.is_cancelled(), "the delisted watcher must be cancelled");
+        assert!(!kept.is_cancelled(), "a listed watcher must keep running");
+        assert!(pool.running.contains_key("id:still-listed"));
+        assert!(!pool.running.contains_key("id:delisted"));
+    }
+
+    /// A log the operator put in `custom_logs` / `static_logs` is not the
+    /// catalog's to remove.
+    #[test]
+    fn retire_absent_never_stops_a_locally_configured_log() {
+        let tracker = LogTracker::new();
+        let mut pool = WatcherPool::default();
+        let local = running(&mut pool, "url:https://mine.example", "https://mine.example", true);
+
+        let stopped = retire_absent(&mut pool, &HashSet::new(), RemovedLogPolicy::Stop, &tracker);
+
+        assert_eq!(stopped, 0);
+        assert!(!local.is_cancelled());
+        assert!(pool.running.contains_key("url:https://mine.example"));
+    }
+
+    #[test]
+    fn keep_policy_leaves_delisted_watchers_running() {
+        let tracker = LogTracker::new();
+        let mut pool = WatcherPool::default();
+        let delisted = running(&mut pool, "id:delisted", "https://b.example", false);
+
+        let stopped = retire_absent(&mut pool, &HashSet::new(), RemovedLogPolicy::Keep, &tracker);
+
+        assert_eq!(stopped, 0);
+        assert!(!delisted.is_cancelled());
+    }
+
+    /// Retiring a watcher has to take the log out of the tracker too, or
+    /// `/api/logs` and the health rollup keep counting a watcher that is gone.
+    #[test]
+    fn retiring_a_watcher_deregisters_it_from_the_tracker() {
+        let tracker = LogTracker::new();
+        tracker.register(
+            "Delisted".to_string(),
+            "https://b.example".to_string(),
+            "Test".to_string(),
+        );
+        assert_eq!(tracker.get_all().len(), 1);
+
+        let mut pool = WatcherPool::default();
+        running(&mut pool, "id:delisted", "https://b.example", false);
+        retire_absent(&mut pool, &HashSet::new(), RemovedLogPolicy::Stop, &tracker);
+
+        assert!(tracker.get_all().is_empty());
+    }
+
+    /// The point of keying the pool: a refresh that re-lists a running log
+    /// must not spawn a second watcher for it, because restarting one would
+    /// throw away its in-memory position.
+    #[test]
+    fn a_relisted_log_is_not_spawned_again() {
+        let mut pool = WatcherPool::default();
+        let log = test_log("Argon", "https://ct.example.com/2026h1/", Some("abc123="));
+        running(&mut pool, &watcher_key(&log), &log.normalized_url(), false);
+
+        let fresh: Vec<&ct::CtLog> = [&log]
+            .into_iter()
+            .filter(|l| !pool.running.contains_key(&watcher_key(l)))
+            .collect();
+
+        assert!(fresh.is_empty(), "an already-running log must be skipped");
+    }
+
+    /// Cancelling the process token must still stop watchers whose own token
+    /// is a child of it.
+    #[test]
+    fn a_child_token_is_cancelled_by_the_process_token() {
+        let process = CancellationToken::new();
+        let watcher = process.child_token();
+        assert!(!watcher.is_cancelled());
+        process.cancel();
+        assert!(watcher.is_cancelled());
+    }
+
+    /// …and cancelling one watcher must not touch its siblings or the parent.
+    #[test]
+    fn cancelling_one_child_token_leaves_the_others_alone() {
+        let process = CancellationToken::new();
+        let a = process.child_token();
+        let b = process.child_token();
+        a.cancel();
+        assert!(a.is_cancelled());
+        assert!(!b.is_cancelled());
+        assert!(!process.is_cancelled());
+    }
+
+    /// `operator_limiters` is shared across refreshes so a log added later
+    /// lands in the same token bucket as its operator's existing logs —
+    /// otherwise a refresh would quietly double that operator's request rate.
+    #[test]
+    fn operator_limiters_are_reused_across_reconciles() {
+        let mut limiters: HashMap<String, ct::OperatorRateLimiter> = HashMap::new();
+        let make = || {
+            Arc::new(ct::OperatorLimiter::with_burst(
+                Duration::from_millis(500),
+                4,
+            ))
+        };
+        let first = limiters.entry("digicert".into()).or_insert_with(make).clone();
+        let second = limiters.entry("digicert".into()).or_insert_with(make).clone();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
 
     fn transport_with(operators: &[&str]) -> OperatorTransport {
         let ct_log = CtLogConfig {

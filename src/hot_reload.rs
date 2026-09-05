@@ -115,13 +115,11 @@ impl HotReloadManager {
 /// Load a partial config from YAML, falling back to the CURRENT in-memory
 /// hot-reloadable state for any section that's absent or unparseable.
 ///
-/// **Security-critical fix (formerly P0)**: pre-1.5.0 this returned
-/// `AuthConfig::default()` for a missing `auth:` block — which is
-/// `enabled = false`. A deployment that enabled auth via env-only
-/// (`CERTSTREAM_AUTH_ENABLED=true`) plus a YAML without an explicit `auth:`
-/// section would silently DROP authentication on the first config-file
-/// modification. The fix keeps each section's *current* state unless the
-/// reload explicitly overrides it.
+/// Security-critical: an absent section keeps its *current* state rather than
+/// falling back to its default. `AuthConfig::default()` is `enabled = false`,
+/// so a deployment that turns auth on through the environment
+/// (`CERTSTREAM_AUTH_ENABLED=true`) and has no explicit `auth:` block would
+/// otherwise lose authentication on the first edit to the config file.
 fn load_hot_reloadable_config(
     path: &str,
     current: &HotReloadableConfig,
@@ -256,7 +254,7 @@ auth:
 
     #[test]
     fn test_load_empty_yaml_keeps_current() {
-        // Regression: pre-1.5.0 an empty YAML returned all-defaults, which
+        // An empty YAML must not read as all-defaults, which
         // SILENTLY DISABLED auth/rate-limit even if they were on at startup.
         // Now an empty (or partial) YAML must preserve the current state.
         let dir = std::env::temp_dir().join("certstream_test_empty.yaml");

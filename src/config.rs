@@ -159,6 +159,15 @@ pub struct CtLogConfig {
     pub health_check_interval_secs: u64,
     #[serde(default = "default_state_file")]
     pub state_file: Option<String>,
+    /// What to do when `state_file` exists but cannot be read or parsed.
+    /// `fresh` (default) warns and restarts every watcher from the log head;
+    /// `fail` refuses to start, so an operator who cares about continuity is
+    /// told the saved position is gone instead of silently re-reading from
+    /// the head. A missing state file is a first run, not a corrupt one, and
+    /// starts fresh under both settings.
+    /// Override with `CERTSTREAM_CT_LOG_STATE_RECOVERY`.
+    #[serde(default)]
+    pub state_recovery: StateRecovery,
     #[serde(default = "default_batch_size")]
     pub batch_size: u64,
     #[serde(default = "default_poll_interval_ms")]
@@ -166,14 +175,39 @@ pub struct CtLogConfig {
     /// Number of get-entries windows / tiles fetched concurrently per watcher
     /// during catch-up. The per-operator token bucket allows a burst of this
     /// size, so the long-run request rate still honours the operator rate
-    /// limit — concurrency only pipelines the latency. 1 = sequential
-    /// (pre-1.5.3 behaviour).
+    /// limit — concurrency only pipelines the latency. 1 = sequential.
     #[serde(default = "default_fetch_concurrency")]
     pub fetch_concurrency: u32,
     /// Number of leaves a fresh static-CT watcher starts behind the current checkpoint head.
     /// The default preserves the existing head-256 behavior while making the overlap tunable.
     #[serde(default = "default_start_overlap_leaves")]
     pub start_overlap_leaves: u64,
+    /// How often the CT log list is re-fetched while the server runs, so a
+    /// log added to the catalog is picked up without a restart. `0` disables
+    /// refresh entirely, leaving discovery to happen once at boot.
+    /// Override with `CERTSTREAM_CT_LOG_REFRESH_INTERVAL_SECS`.
+    #[serde(default = "default_log_refresh_interval_secs")]
+    pub log_refresh_interval_secs: u64,
+    /// What a refresh does with a running watcher whose log the catalog no
+    /// longer lists. Never applies to logs from `custom_logs` / `static_logs`:
+    /// those come from this server's own config, so a catalog that stops
+    /// listing them says nothing about them.
+    /// Override with `CERTSTREAM_CT_LOG_REMOVED_POLICY`.
+    #[serde(default)]
+    pub removed_log_policy: RemovedLogPolicy,
+    /// Merkle verification against a static-CT log's own hash tiles. The
+    /// checkpoint signature says the log signed *some* tree; these say
+    /// whether that tree contains what was just read, and whether it extends
+    /// the tree seen a moment ago. Extra fetches and CPU, so opt-in.
+    /// Override with `CERTSTREAM_STATIC_CT_MERKLE_VERIFICATION`.
+    #[serde(default)]
+    pub merkle_verification: MerkleVerification,
+    /// Read names from a static-CT log's optional names-tiles extension
+    /// instead of parsing its data tiles. Far cheaper for a
+    /// domains-only deployment, and unauthenticated — see [`NamesTiles`].
+    /// Override with `CERTSTREAM_STATIC_CT_NAMES_TILES`.
+    #[serde(default)]
+    pub names_tiles: NamesTiles,
     /// Master switch for the legacy RFC 6962 watcher pool. When `false`, the
     /// Google v3 log list (and any `custom_logs`) are skipped at startup.
     /// Override with `CERTSTREAM_RFC6962_ENABLED`.
@@ -216,6 +250,126 @@ pub struct CtLogConfig {
     /// it cannot promote an unverified source. Unknown keys are ignored.
     #[serde(default)]
     pub catalog_authority_overrides: std::collections::HashMap<String, bool>,
+}
+
+/// Whether to collect names from a log's names-tiles extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NamesTiles {
+    /// Always read data tiles. Default.
+    #[default]
+    Off,
+    /// Read names tiles from logs that serve them, and data tiles from logs
+    /// that do not.
+    ///
+    /// Names tiles are unauthenticated: the extension states they cannot be
+    /// checked for inclusion in a signed tree head. Entries read this way are
+    /// published as `dns_entries_unauthenticated` so a consumer can tell them
+    /// apart, and this mode is only valid when `domains_only` is the sole
+    /// enabled stream — there is no certificate to build the others from.
+    Prefer,
+}
+
+impl std::str::FromStr for NamesTiles {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => Ok(Self::Off),
+            "prefer" => Ok(Self::Prefer),
+            _ => Err(()),
+        }
+    }
+}
+
+/// How much of a static-CT log's tree to verify while reading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MerkleVerification {
+    /// Trust the checkpoint signature and read. Default, and what every
+    /// release before 1.6 did.
+    #[default]
+    Off,
+    /// Prove each new checkpoint extends the previous one. A handful of extra
+    /// hash-tile fetches per checkpoint; catches a log that rewrites history.
+    Consistency,
+    /// Consistency, plus proof that every ingested entry is in the signed
+    /// tree. Costs hash-tile fetches and hashing proportional to ingest.
+    Full,
+}
+
+impl MerkleVerification {
+    pub fn checks_consistency(self) -> bool {
+        matches!(self, Self::Consistency | Self::Full)
+    }
+
+    pub fn checks_inclusion(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
+impl std::str::FromStr for MerkleVerification {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => Ok(Self::Off),
+            "consistency" => Ok(Self::Consistency),
+            "full" => Ok(Self::Full),
+            _ => Err(()),
+        }
+    }
+}
+
+/// What a log-list refresh does with a watcher whose log was delisted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemovedLogPolicy {
+    /// Stop the watcher. Default: a delisted log is retired or rejected, and
+    /// polling it spends operator request budget on a tree that no longer
+    /// grows. The saved position is kept, so a log that reappears resumes
+    /// where it stopped rather than replaying.
+    #[default]
+    Stop,
+    /// Leave it running. For deployments that would rather keep reading a
+    /// delisted log than trust the catalog's removal.
+    Keep,
+}
+
+impl std::str::FromStr for RemovedLogPolicy {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "stop" => Ok(Self::Stop),
+            "keep" => Ok(Self::Keep),
+            _ => Err(()),
+        }
+    }
+}
+
+/// What to do with a state file that exists but cannot be loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StateRecovery {
+    /// Warn and start from the log head. Default.
+    #[default]
+    Fresh,
+    /// Refuse to start. For deployments where re-reading from the head is
+    /// worse than not running.
+    Fail,
+}
+
+impl std::str::FromStr for StateRecovery {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "fresh" => Ok(Self::Fresh),
+            "fail" => Ok(Self::Fail),
+            _ => Err(()),
+        }
+    }
 }
 
 /// Verification policy for static-CT checkpoint signatures.
@@ -270,6 +424,11 @@ impl Default for CtLogConfig {
             unhealthy_threshold: default_unhealthy_threshold(),
             health_check_interval_secs: default_health_check_interval_secs(),
             state_file: default_state_file(),
+            state_recovery: StateRecovery::default(),
+            merkle_verification: MerkleVerification::default(),
+            names_tiles: NamesTiles::default(),
+            log_refresh_interval_secs: default_log_refresh_interval_secs(),
+            removed_log_policy: RemovedLogPolicy::default(),
             batch_size: default_batch_size(),
             poll_interval_ms: default_poll_interval_ms(),
             fetch_concurrency: default_fetch_concurrency(),
@@ -338,6 +497,12 @@ fn default_fetch_concurrency() -> u32 {
 }
 fn default_start_overlap_leaves() -> u64 {
     256
+}
+fn default_log_refresh_interval_secs() -> u64 {
+    // Log lists change on the scale of weeks. Hourly is frequent enough that
+    // a new log is picked up the same day and rare enough that the catalog
+    // fetch is nothing next to the ingest traffic.
+    3600
 }
 fn default_state_file() -> Option<String> {
     Some("certstream_state.json".to_string())
@@ -507,6 +672,13 @@ pub struct StreamConfig {
     pub lite: bool,
     #[serde(default = "default_true")]
     pub domains_only: bool,
+    /// Version 2 of the wire format: the same certificate with an explicit
+    /// source address (`log_id` + entry index), entry type, observation time,
+    /// and what was actually verified. Off by default — it is a fourth
+    /// serialization of every certificate, and a deployment that nobody
+    /// consumes it from should not pay for it.
+    #[serde(default)]
+    pub v2: bool,
 }
 
 impl Default for StreamConfig {
@@ -515,8 +687,113 @@ impl Default for StreamConfig {
             full: true,
             lite: true,
             domains_only: true,
+            v2: false,
         }
     }
+}
+
+/// What to do when JetStream will not take a record — a full stream under
+/// `discard: new`, a broker that is down, or an acknowledgement that never
+/// arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NatsOnFull {
+    /// Wait for room. The saved position stays behind the unstored record, so
+    /// a restart re-reads it. Slows ingest rather than losing data. Default,
+    /// because a durable output that quietly drops is not a durable output.
+    #[default]
+    Block,
+    /// Give up on the record and keep reading. For a deployment that would
+    /// rather have a live stream with holes than a stalled one.
+    Drop,
+}
+
+impl std::str::FromStr for NatsOnFull {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "block" => Ok(Self::Block),
+            "drop" => Ok(Self::Drop),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Optional durable output to NATS JetStream.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NatsConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_nats_url")]
+    pub url: String,
+    #[serde(default = "default_nats_stream")]
+    pub stream: String,
+    /// Records are published to `<prefix>.<operator>.<log>`, so a consumer can
+    /// subscribe to one operator or one log instead of the whole feed.
+    #[serde(default = "default_nats_subject_prefix")]
+    pub subject_prefix: String,
+    /// Stream size cap. Reaching it rejects publishes rather than deleting the
+    /// oldest records — see [`NatsOnFull`].
+    #[serde(default = "default_nats_max_bytes")]
+    pub max_bytes: i64,
+    /// How long the server remembers a `Nats-Msg-Id`. A restart that re-reads
+    /// entries republishes them with the same id; inside this window the
+    /// server recognises them and stores one copy. Set it wider than the
+    /// longest restart you expect to survive without duplicates.
+    #[serde(default = "default_nats_duplicate_window_secs")]
+    pub duplicate_window_secs: u64,
+    #[serde(default = "default_nats_publish_timeout_secs")]
+    pub publish_timeout_secs: u64,
+    /// Records queued between the watchers and the publisher. Deep enough to
+    /// absorb a slow ack, shallow enough that back-pressure reaches ingest
+    /// before memory does.
+    #[serde(default = "default_nats_queue_depth")]
+    pub queue_depth: usize,
+    #[serde(default)]
+    pub on_full: NatsOnFull,
+}
+
+impl Default for NatsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: default_nats_url(),
+            stream: default_nats_stream(),
+            subject_prefix: default_nats_subject_prefix(),
+            max_bytes: default_nats_max_bytes(),
+            duplicate_window_secs: default_nats_duplicate_window_secs(),
+            publish_timeout_secs: default_nats_publish_timeout_secs(),
+            queue_depth: default_nats_queue_depth(),
+            on_full: NatsOnFull::default(),
+        }
+    }
+}
+
+fn default_nats_url() -> String {
+    "nats://127.0.0.1:4222".to_string()
+}
+fn default_nats_stream() -> String {
+    "CERTSTREAM".to_string()
+}
+fn default_nats_subject_prefix() -> String {
+    "certstream".to_string()
+}
+fn default_nats_max_bytes() -> i64 {
+    // 8 GiB. Explicit rather than unlimited: "unlimited" means the disk
+    // decides what happens when the stream fills, and it decides badly.
+    8 * 1024 * 1024 * 1024
+}
+fn default_nats_duplicate_window_secs() -> u64 {
+    // Wider than JetStream's 2-minute default: a restart that re-reads a
+    // batch should still be deduplicated after a slow redeploy.
+    900
+}
+fn default_nats_publish_timeout_secs() -> u64 {
+    30
+}
+fn default_nats_queue_depth() -> usize {
+    10_000
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -548,6 +825,7 @@ pub struct Config {
     pub api: ApiConfig,
     pub auth: AuthConfig,
     pub hot_reload: HotReloadConfig,
+    pub nats: NatsConfig,
     pub streams: StreamConfig,
     pub dedup: DedupConfig,
     pub config_path: Option<String>,
@@ -579,6 +857,7 @@ struct YamlConfig {
     auth: Option<AuthConfig>,
     #[serde(default)]
     hot_reload: Option<HotReloadConfig>,
+    nats: Option<NatsConfig>,
     #[serde(default)]
     streams: Option<StreamConfig>,
     #[serde(default)]
@@ -647,6 +926,17 @@ impl Config {
         env_override!(ct_log.healthy_threshold, "CERTSTREAM_CT_LOG_HEALTHY_THRESHOLD");
         env_override!(ct_log.health_check_interval_secs, "CERTSTREAM_CT_LOG_HEALTH_CHECK_INTERVAL_SECS");
         env_override!(ct_log.state_file, "CERTSTREAM_CT_LOG_STATE_FILE", some_str);
+        env_override!(ct_log.state_recovery, "CERTSTREAM_CT_LOG_STATE_RECOVERY");
+        env_override!(
+            ct_log.log_refresh_interval_secs,
+            "CERTSTREAM_CT_LOG_REFRESH_INTERVAL_SECS"
+        );
+        env_override!(ct_log.removed_log_policy, "CERTSTREAM_CT_LOG_REMOVED_POLICY");
+        env_override!(
+            ct_log.merkle_verification,
+            "CERTSTREAM_STATIC_CT_MERKLE_VERIFICATION"
+        );
+        env_override!(ct_log.names_tiles, "CERTSTREAM_STATIC_CT_NAMES_TILES");
         env_override!(ct_log.batch_size, "CERTSTREAM_CT_LOG_BATCH_SIZE");
         env_override!(ct_log.poll_interval_ms, "CERTSTREAM_CT_LOG_POLL_INTERVAL_MS");
         env_override!(ct_log.fetch_concurrency, "CERTSTREAM_CT_LOG_FETCH_CONCURRENCY");
@@ -692,6 +982,15 @@ impl Config {
         env_override!(streams.full, "CERTSTREAM_STREAM_FULL_ENABLED");
         env_override!(streams.lite, "CERTSTREAM_STREAM_LITE_ENABLED");
         env_override!(streams.domains_only, "CERTSTREAM_STREAM_DOMAINS_ONLY_ENABLED");
+        env_override!(streams.v2, "CERTSTREAM_STREAM_V2_ENABLED");
+
+        let mut nats = yaml_config.nats.unwrap_or_default();
+        env_override!(nats.enabled, "CERTSTREAM_NATS_ENABLED");
+        env_override!(nats.url, "CERTSTREAM_NATS_URL", str);
+        env_override!(nats.stream, "CERTSTREAM_NATS_STREAM", str);
+        env_override!(nats.subject_prefix, "CERTSTREAM_NATS_SUBJECT_PREFIX", str);
+        env_override!(nats.max_bytes, "CERTSTREAM_NATS_MAX_BYTES");
+        env_override!(nats.on_full, "CERTSTREAM_NATS_ON_FULL");
 
         Self {
             host,
@@ -709,6 +1008,7 @@ impl Config {
             api,
             auth,
             hot_reload,
+            nats,
             streams,
             dedup,
             config_path,
@@ -730,6 +1030,34 @@ impl Config {
                 field: "buffer_size".to_string(),
                 message: "Buffer size must be greater than 0".to_string(),
             });
+        }
+
+        // A names tile carries names, not a certificate. There is nothing to
+        // build the full, lite or v2 payloads from, so asking for both is a
+        // configuration that cannot be satisfied rather than one to satisfy
+        // partially.
+        if self.ct_log.names_tiles == NamesTiles::Prefer {
+            if self.streams.full || self.streams.lite || self.streams.v2 {
+                errors.push(ConfigValidationError {
+                    field: "ct_log.names_tiles".to_string(),
+                    message:
+                        "`prefer` needs domains_only to be the only enabled stream; names tiles \
+                         carry no certificate to build the full, lite or v2 payloads from"
+                            .to_string(),
+                });
+            }
+            // The durable output publishes v2 records, which a names entry
+            // cannot produce. Accepting both would run a server that reports
+            // JetStream as enabled while every names-serving log silently
+            // published nothing and never advanced its saved position.
+            if self.nats.enabled {
+                errors.push(ConfigValidationError {
+                    field: "ct_log.names_tiles".to_string(),
+                    message: "`prefer` cannot be combined with nats.enabled; names tiles carry no \
+                              certificate, so there is no durable record to publish"
+                        .to_string(),
+                });
+            }
         }
 
         if self.has_tls() {
@@ -855,6 +1183,7 @@ mod tests {
             api: ApiConfig::default(),
             auth: AuthConfig::default(),
             hot_reload: HotReloadConfig::default(),
+            nats: NatsConfig::default(),
             streams: StreamConfig::default(),
             dedup: DedupConfig::default(),
             config_path: None,
@@ -1218,6 +1547,62 @@ start_overlap_leaves: 1024
         assert_eq!(config.batch_size, 512);
         assert_eq!(config.start_overlap_leaves, 1024);
         assert_eq!(config.retry_initial_delay_ms, 1000);
+    }
+
+    fn names_mode(nats_enabled: bool, streams: StreamConfig) -> Config {
+        Config {
+            ct_log: CtLogConfig {
+                names_tiles: NamesTiles::Prefer,
+                ..CtLogConfig::default()
+            },
+            nats: NatsConfig {
+                enabled: nats_enabled,
+                ..NatsConfig::default()
+            },
+            streams,
+            ..test_config()
+        }
+    }
+
+    fn domains_only() -> StreamConfig {
+        StreamConfig {
+            full: false,
+            lite: false,
+            domains_only: true,
+            v2: false,
+        }
+    }
+
+    /// A names tile carries no certificate, so the durable output has no v2
+    /// record to publish. Accepting the pair would run a server that reports
+    /// JetStream as enabled while names-serving logs published nothing.
+    #[test]
+    fn names_tiles_cannot_be_combined_with_the_durable_output() {
+        let Err(errors) = names_mode(true, domains_only()).validate() else {
+            panic!("names_tiles + nats must not validate");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "ct_log.names_tiles" && e.message.contains("nats.enabled")),
+            "{errors:?}"
+        );
+
+        assert!(names_mode(false, domains_only()).validate().is_ok());
+    }
+
+    #[test]
+    fn names_tiles_requires_domains_only_to_be_the_sole_stream() {
+        for streams in [
+            StreamConfig { full: true, ..domains_only() },
+            StreamConfig { lite: true, ..domains_only() },
+            StreamConfig { v2: true, ..domains_only() },
+        ] {
+            assert!(
+                names_mode(false, streams).validate().is_err(),
+                "names tiles cannot feed the certificate streams"
+            );
+        }
     }
 
     #[test]

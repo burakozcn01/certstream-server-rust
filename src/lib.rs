@@ -24,7 +24,15 @@ pub mod memstats;
 #[doc(hidden)]
 pub mod middleware;
 #[doc(hidden)]
+pub mod nats;
+#[doc(hidden)]
+pub mod backfill;
+#[doc(hidden)]
+pub mod filter;
+#[doc(hidden)]
 pub mod hot_reload;
+#[doc(hidden)]
+pub mod lag_policy;
 #[doc(hidden)]
 pub mod rate_limit;
 #[doc(hidden)]

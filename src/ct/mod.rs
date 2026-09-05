@@ -1,4 +1,6 @@
 pub mod catalog;
+pub mod merkle;
+pub mod names_tiles;
 mod log_list;
 mod normalize;
 mod parser;
@@ -111,16 +113,21 @@ pub struct WatcherContext {
     pub dedup: Arc<DedupFilter>,
     pub rate_limiter: Option<OperatorRateLimiter>,
     pub streams: Arc<StreamConfig>,
-    /// Single issuer-DER cache shared across ALL static-CT watchers. Pre-1.5.0
-    /// each watcher had its own 10K-entry cache, so 55 static-CT logs meant
-    /// up to 550K cached issuer DERs (each multi-KB). Sharing collapses the
-    /// effective footprint to one cache and lets distinct logs amortise
-    /// fetches for common roots (Let's Encrypt R10, ISRG X1, …).
+    /// Server-side subscription filters. The watcher only consults
+    /// [`FilterHub::active`], to decide whether the broadcast payload has to
+    /// carry the parsed leaf for matching.
+    pub filters: Arc<crate::filter::FilterHub>,
+    /// Durable output. `None` unless `nats.enabled`.
+    pub nats: Option<crate::nats::NatsSink>,
+    /// One issuer-DER cache for every static-CT watcher. A cache per watcher
+    /// would hold the same multi-KB issuer DERs once per log; sharing it also
+    /// lets distinct logs amortise fetches for the roots they have in common
+    /// (Let's Encrypt R10, ISRG X1, …).
     pub issuer_cache: Arc<IssuerCache>,
 }
 
-/// Issue #2: Build a CachedCert sharing the Arc<LeafCert> and Arc<Source> —
-/// zero field clones, zero per-cert String allocations.
+/// Builds the cache entry from the `Arc`s the message already holds, so it
+/// shares the leaf and source rather than copying their fields.
 pub fn build_cached_cert(
     leaf: Arc<LeafCert>,
     seen: f64,
@@ -136,20 +143,104 @@ pub fn build_cached_cert(
 }
 
 /// Serialize and broadcast a certificate message to all subscribers.
-/// Issue #3: `messages_counter` is pre-registered outside the hot loop — no label allocation.
+/// `messages_counter` is registered by the caller, outside the hot loop, so
+/// this does not allocate its labels per certificate.
 ///
 /// Idle-server optimisation: skip the (up to) three-format JSON serialisation
 /// entirely when no WebSocket/SSE subscriber is listening. The cache push and
 /// stats updates still run so REST clients of `/api/cert/{hash}` keep working.
-pub fn broadcast_cert(
-    msg: CertificateMessage,
+/// How far behind wall-clock the newest entry a watcher just ingested is.
+///
+/// `certstream_ct_log_lag_entries` answers "how many records behind the head
+/// am I"; this answers "how old is what I just delivered". A watcher sitting a
+/// constant 200 entries behind a busy log and one sitting 200 entries behind an
+/// idle log are indistinguishable in entry count and nothing alike here, and
+/// only the second number tells a consumer how current its view of the CT
+/// ecosystem is.
+///
+/// Called once per ingested batch, not once per certificate: the value is the
+/// newest entry in the batch, which is the freshest thing the watcher has.
+pub fn record_ingest_delay(log_name: &str, newest_submission_secs: f64, now_secs: f64) {
+    // 0.0 is "no usable timestamp" (a leaf we could not date); a submission
+    // slightly ahead of our clock is skew, not negative delay.
+    if newest_submission_secs <= 0.0 {
+        return;
+    }
+    metrics::gauge!("certstream_ct_log_ingest_delay_seconds", "log" => log_name.to_string())
+        .set((now_secs - newest_submission_secs).max(0.0));
+}
+
+/// Publish an entry read from a names tile.
+///
+/// Separate from [`broadcast_cert`] because there is no certificate: no
+/// hashes for the cache or for cross-log dedup, and nothing to build the
+/// full, lite or v2 payloads from. The message type says so — a consumer must
+/// never have to guess whether the names it received were checked against a
+/// signed tree.
+pub fn broadcast_names(
+    entry: &crate::ct::names_tiles::NamesEntry,
     tx: &broadcast::Sender<Arc<PreSerializedMessage>>,
-    cache: &CertificateCache,
-    cached: CachedCert,
     stats: &ServerStats,
     messages_counter: &metrics::Counter,
-    streams: &StreamConfig,
 ) {
+    stats.certificates_processed.fetch_add(1, Ordering::Relaxed);
+    if tx.receiver_count() == 0 {
+        return;
+    }
+
+    #[derive(serde::Serialize)]
+    struct UnauthenticatedNames<'a> {
+        message_type: &'a str,
+        data: &'a crate::models::DomainList,
+    }
+
+    let Some(payload) = crate::models::serialize_utf8(
+        &UnauthenticatedNames {
+            message_type: "dns_entries_unauthenticated",
+            data: &entry.domains,
+        },
+        512,
+    ) else {
+        return;
+    };
+
+    let size = payload.len();
+    let _ = tx.send(Arc::new(PreSerializedMessage {
+        full: axum::extract::ws::Utf8Bytes::from_static(""),
+        lite: axum::extract::ws::Utf8Bytes::from_static(""),
+        domains_only: payload,
+        v2: axum::extract::ws::Utf8Bytes::from_static(""),
+        leaf: None,
+    }));
+    stats.messages_sent.fetch_add(1, Ordering::Relaxed);
+    stats.bytes_serialized.fetch_add(size as u64, Ordering::Relaxed);
+    metrics::counter!("certstream_bytes_serialized_total").increment(size as u64);
+    messages_counter.increment(1);
+}
+
+/// Everything a broadcast needs beyond the message itself. Resolved once per
+/// batch rather than threaded through as six separate arguments.
+pub struct BroadcastTargets<'a> {
+    pub tx: &'a broadcast::Sender<Arc<PreSerializedMessage>>,
+    pub cache: &'a CertificateCache,
+    pub stats: &'a ServerStats,
+    pub messages_counter: &'a metrics::Counter,
+    pub streams: &'a StreamConfig,
+    /// Whether a server-side filter exists and so the payload must keep the
+    /// parsed leaf for matching.
+    pub retain_leaf: bool,
+}
+
+pub fn broadcast_cert(msg: CertificateMessage, cached: CachedCert, to: &BroadcastTargets<'_>) {
+    let BroadcastTargets {
+        tx,
+        cache,
+        stats,
+        messages_counter,
+        streams,
+        retain_leaf,
+    } = *to;
+
     cache.push(cached);
 
     // No live subscribers? Skip the serialise round-trip — it can be ~1-3 KB
@@ -159,7 +250,7 @@ pub fn broadcast_cert(
         return;
     }
 
-    if let Some(serialized) = msg.pre_serialize(streams) {
+    if let Some(serialized) = msg.pre_serialize(streams, retain_leaf) {
         // This is what serialization produced, not what went out on the wire.
         // A single domains-only subscriber still pays for `full` and `lite`
         // being serialized when those formats are enabled, and the gap between
@@ -210,6 +301,7 @@ mod broadcast_tests {
         CertificateMessage {
             message_type: Cow::Borrowed("certificate_update"),
             data: CertificateData {
+                verification: Default::default(),
                 update_type: Cow::Borrowed("X509LogEntry"),
                 leaf_cert: make_leaf(),
                 chain: None,
@@ -218,6 +310,9 @@ mod broadcast_tests {
                 seen: 0.0,
                 submission_timestamp: 0.0,
                 source: Arc::new(Source {
+                    log_id: None,
+                    operator: Arc::from("Test"),
+                    log_type: "rfc6962",
                     name: Arc::from("t"),
                     url: Arc::from("u"),
                 }),
@@ -227,6 +322,9 @@ mod broadcast_tests {
 
     fn dummy_cached() -> CachedCert {
         let source = Arc::new(Source {
+            log_id: None,
+            operator: Arc::from("Test"),
+            log_type: "rfc6962",
             name: Arc::from("t"),
             url: Arc::from("u"),
         });
@@ -234,7 +332,7 @@ mod broadcast_tests {
     }
 
     /// Regression for #13: with **no** subscribers, broadcast_cert must skip
-    /// serialisation entirely. Pre-1.5.0 the `_rx` placeholder in main pinned
+    /// serialisation entirely. A long-lived placeholder receiver would pin
     /// receiver_count at 1, so this guard never fired and idle servers
     /// burned CPU on serialise. The fix removed the placeholder.
     #[test]
@@ -258,12 +356,15 @@ mod broadcast_tests {
 
         broadcast_cert(
             dummy_msg(),
-            &tx,
-            &cache,
             dummy_cached(),
-            &stats,
-            &counter,
-            &streams,
+            &BroadcastTargets {
+                tx: &tx,
+                cache: &cache,
+                stats: &stats,
+                messages_counter: &counter,
+                streams: &streams,
+                retain_leaf: false,
+            },
         );
 
         // certificates_processed still increments (REST cache stays warm).
@@ -294,12 +395,15 @@ mod broadcast_tests {
         let before = stats.messages_sent.load(Ordering::Relaxed);
         broadcast_cert(
             dummy_msg(),
-            &tx,
-            &cache,
             dummy_cached(),
-            &stats,
-            &counter,
-            &streams,
+            &BroadcastTargets {
+                tx: &tx,
+                cache: &cache,
+                stats: &stats,
+                messages_counter: &counter,
+                streams: &streams,
+                retain_leaf: false,
+            },
         );
         assert_eq!(
             stats.messages_sent.load(Ordering::Relaxed) - before,

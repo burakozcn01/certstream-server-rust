@@ -161,7 +161,22 @@ DEDUP=$(grep -E '^certstream_duplicates_filtered ' <<<"$M" | awk '{print $2}')
 [[ ${RFC%.*} -ge 10 ]] && ok "RFC6962 watchers discovered: $RFC" || fail "RFC6962 watchers: $RFC"
 [[ ${SCT%.*} -ge 5  ]] && ok "Static-CT watchers discovered: $SCT" || fail "Static-CT watchers: $SCT"
 
-# ---- 13. No panics in logs ----
+# ---- 13. Freshness and completeness metrics ----
+# Throughput and RSS say what the server costs. These say how current and how
+# complete its view is, which is the question a consumer actually has.
+echo "== freshness / completeness =="
+for c in certstream_ct_log_ingest_delay_seconds certstream_ws_messages_lagged \
+         certstream_sse_messages_lagged certstream_ws_disconnect_lag \
+         certstream_sse_disconnect_lag; do
+    grep -q "^$c" <<<"$M" && ok "metric $c present" || fail "metric $c missing"
+done
+
+WORST_DELAY=$(awk 'index($0,"certstream_ct_log_ingest_delay_seconds{")==1 {v=$NF+0; if (v>m) m=v} END {printf "%.0f", m+0}' <<<"$M")
+WORST_LAG=$(awk 'index($0,"certstream_ct_log_lag_entries{")==1 {v=$NF+0; if (v>m) m=v} END {printf "%.0f", m+0}' <<<"$M")
+note "worst log is ${WORST_DELAY}s / ${WORST_LAG} entries behind"
+note "for a full run: bash soak/measure.sh <seconds> <interval>"
+
+# ---- 14. No panics in logs ----
 echo "== log scan =="
 PANICS=$(docker logs certstream-soak 2>&1 | grep -c "panicked\|FATAL\|panic occurred" || true)
 [[ $PANICS == 0 ]] && ok "no panics in container log" || fail "$PANICS panic line(s) in log"

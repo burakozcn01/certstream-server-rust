@@ -140,7 +140,15 @@ pub enum LogType {
 pub struct CtLog {
     pub description: String,
     pub url: String,
+    /// Canonical operator key: lowercased, punctuation collapsed. Groups a
+    /// log with its operator's other logs for rate limiting, and is the same
+    /// string `ct_log.operator_rate_limits` is keyed by. Not a display name —
+    /// "Let's Encrypt" canonicalises to "lets encrypt".
     pub operator: String,
+    /// The operator's name as the catalog spells it. Empty for a locally
+    /// configured log that declares none, in which case callers fall back to
+    /// `operator`.
+    pub operator_display: String,
     pub log_type: LogType,
     /// Explicit checkpoint origin override (see `StaticCtLog::log_origin`).
     pub log_origin: Option<String>,
@@ -175,6 +183,16 @@ impl CtLog {
         }
     }
 
+    /// The operator's name as a person would write it, falling back to the
+    /// canonical key when the source carries no display name.
+    pub fn operator_name(&self) -> &str {
+        if self.operator_display.is_empty() {
+            &self.operator
+        } else {
+            &self.operator_display
+        }
+    }
+
     pub fn normalized_url(&self) -> String {
         let url = self.url.trim_end_matches('/');
         if url.starts_with("https://") || url.starts_with("http://") {
@@ -191,6 +209,7 @@ impl From<CustomCtLog> for CtLog {
             description: custom.name,
             url: custom.url,
             operator: "Custom".to_string(),
+            operator_display: String::new(),
             log_type: LogType::Rfc6962,
             log_origin: None,
             log_id: custom.expected_log_id,
@@ -215,6 +234,7 @@ impl From<StaticCtLog> for CtLog {
             operator: static_log
                 .operator
                 .unwrap_or_else(|| UNATTRIBUTED_STATIC_OPERATOR.to_string()),
+            operator_display: String::new(),
             log_type: LogType::StaticCt,
             log_origin: static_log.log_origin,
             log_id: static_log.expected_log_id,
@@ -236,13 +256,13 @@ impl From<StaticCtLog> for CtLog {
 /// sit in their own. An override that declares its own `operator` keeps it,
 /// and one that replaces nothing keeps the generic name.
 pub fn inherit_operators(discovered: &[CtLog], overrides: &mut [CtLog]) {
-    let by_id: HashMap<&str, &str> = discovered
+    let by_id: HashMap<&str, (&str, &str)> = discovered
         .iter()
         .filter_map(|l| {
             l.log_id
                 .as_deref()
                 .filter(|id| !id.is_empty())
-                .map(|id| (id, l.operator.as_str()))
+                .map(|id| (id, (l.operator.as_str(), l.operator_display.as_str())))
         })
         .collect();
 
@@ -250,11 +270,12 @@ pub fn inherit_operators(discovered: &[CtLog], overrides: &mut [CtLog]) {
         if override_log.operator != UNATTRIBUTED_STATIC_OPERATOR {
             continue;
         }
-        if let Some(operator) = override_log
+        if let Some((operator, display)) = override_log
             .log_id
             .as_deref()
             .and_then(|id| by_id.get(id))
         {
+            override_log.operator_display = (*display).to_string();
             override_log.operator = (*operator).to_string();
         }
     }
@@ -338,6 +359,7 @@ fn make_test_log(description: &str, url: &str, state: Option<LogState>) -> CtLog
         description: description.to_string(),
         url: url.to_string(),
         operator: "TestOp".to_string(),
+        operator_display: String::new(),
         log_type: LogType::Rfc6962,
         log_origin: None,
         log_id: None,
@@ -408,6 +430,7 @@ fn parse_list(bytes: &[u8], source_name: &str) -> Vec<CtLog> {
     for op in response.operators {
         count_unknown_fields(source_name, &op._other);
         let operator = normalize_operator(&op.name);
+        let operator_display = op.name.clone();
         for raw in op.logs {
             count_unknown_fields(source_name, &raw._other);
             count_unknown_state_enum(source_name, raw.state.as_ref());
@@ -415,6 +438,7 @@ fn parse_list(bytes: &[u8], source_name: &str) -> Vec<CtLog> {
                 description: raw.description,
                 url: normalize_url(&raw.url),
                 operator: operator.clone(),
+                operator_display: operator_display.clone(),
                 log_type: LogType::Rfc6962,
                 log_origin: None,
                 log_id: raw.log_id,
@@ -434,6 +458,7 @@ fn parse_list(bytes: &[u8], source_name: &str) -> Vec<CtLog> {
                 description: raw.description,
                 url: normalize_url(&raw.monitoring_url),
                 operator: operator.clone(),
+                operator_display: operator_display.clone(),
                 log_type: LogType::StaticCt,
                 log_origin: Some(normalize_log_origin(&raw.submission_url)),
                 log_id: raw.log_id,
@@ -831,6 +856,20 @@ mod tests {
         let mut additive = make_test_log("additive", "https://new.example.com/log", None);
         additive.log_id = Some("logid-y".to_string());
         assert!(local_override_conflicts(&[discovered], &[additive]).is_empty());
+    }
+
+    #[test]
+    fn an_operator_name_falls_back_to_the_canonical_key() {
+        let mut log = make_test_log("d", "https://ct.example.com/log", None);
+        assert_eq!(
+            log.operator_name(),
+            "TestOp",
+            "a source with no display name falls back to the key"
+        );
+
+        log.operator = "lets encrypt".to_string();
+        log.operator_display = "Let's Encrypt".to_string();
+        assert_eq!(log.operator_name(), "Let's Encrypt");
     }
 
     #[test]

@@ -19,6 +19,7 @@ use super::{
     parse_certificate_with_options,
 };
 use crate::config::{CheckpointSignatureMode, TreeSizeSource};
+use crate::models::VerificationState;
 use crate::models::{CertificateData, CertificateMessage, ChainCert, Source};
 
 /// A parsed static CT checkpoint.
@@ -47,8 +48,8 @@ pub struct Checkpoint {
 pub struct TileLeaf {
     pub submission_timestamp: u64,
     pub entry_type: u16,
-    /// Zero-copy slice of the shared decompressed tile buffer. Pre-1.5.3 this
-    /// was a per-leaf `Vec<u8>` copy — 256 allocations + ~2-3 MiB of memcpy
+    /// A refcounted slice of the shared decompressed tile buffer rather than a
+    /// per-leaf copy, which would be 256 allocations and a few MiB of memcpy
     /// per tile.
     pub cert_der: Bytes,
     pub is_precert: bool,
@@ -59,6 +60,13 @@ pub struct TileLeaf {
     /// match `tile_start_index + offset_in_tile`; a mismatch is logged as an
     /// integrity warning.
     pub leaf_index: Option<u64>,
+    /// The entry's RFC 6962 `TimestampedEntry`, exactly as it appeared in the
+    /// tile. Merkle verification hashes `[0x00, 0x00] || TimestampedEntry`,
+    /// and re-marshaling those bytes from the parsed fields would risk
+    /// producing a different encoding than the log signed — so the range is
+    /// sliced out of the shared tile buffer instead. A refcount bump, not a
+    /// copy.
+    pub timestamped_entry: Bytes,
 }
 
 /// Parse a `CtExtensions` blob and return the `leaf_index` value (extension
@@ -252,6 +260,125 @@ pub fn verify_checkpoint_signature(
 /// Returns `true` if the checkpoint should be accepted; only `enforce` mode on
 /// a `Failed` outcome returns `false`.
 #[allow(clippy::too_many_arguments)]
+/// NATS subjects are dot-delimited tokens; a log description contains spaces,
+/// quotes and dots of its own, any of which would silently reshape the
+/// subject hierarchy.
+pub fn subject_token(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut pending_sep = false;
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() {
+            if pending_sep && !out.is_empty() {
+                out.push('-');
+            }
+            pending_sep = false;
+            out.extend(c.to_lowercase());
+        } else {
+            pending_sep = true;
+        }
+    }
+    if out.is_empty() { "unknown".to_string() } else { out }
+}
+
+/// Prove the new checkpoint's tree extends the last one this watcher verified.
+///
+/// Runs on a blocking thread: the tlog verifier is synchronous and fetches
+/// hash tiles as it goes, so it cannot run on a runtime worker.
+async fn check_tree_consistency(
+    reader: &Arc<crate::ct::merkle::HttpTileReader>,
+    last: &mut Option<(u64, tlog_tiles::Hash)>,
+    cp: &Checkpoint,
+    log_name: &str,
+    source_id: &str,
+) -> Result<(), String> {
+    let new_root = crate::ct::merkle::parse_root_hash(&cp.root_hash)?;
+    let new_size = cp.tree_size;
+
+    let Some((old_size, old_root)) = *last else {
+        // First checkpoint of this process: nothing to extend yet. It becomes
+        // the anchor every later checkpoint is proven against.
+        *last = Some((new_size, new_root));
+        return Ok(());
+    };
+    if new_size == old_size {
+        // Same size, so there is nothing to fetch — but the roots still have
+        // to agree, or the log replaced an entry in place.
+        return if old_root == new_root {
+            Ok(())
+        } else {
+            metrics::counter!(
+                "certstream_static_ct_consistency_failed",
+                "log" => log_name.to_string(),
+                "source_id" => source_id.to_string()
+            )
+            .increment(1);
+            Err(format!(
+                "tree size {new_size} is unchanged but its root is not; the log rewrote history"
+            ))
+        };
+    }
+
+    let reader = Arc::clone(reader);
+    let verdict = tokio::task::spawn_blocking(move || {
+        crate::ct::merkle::verify_consistency(&reader, old_size, old_root, new_size, new_root)
+    })
+    .await
+    .map_err(|e| format!("consistency check task failed: {e}"))?;
+
+    match verdict {
+        crate::ct::merkle::Verdict::Verified => {
+            metrics::counter!(
+                "certstream_static_ct_consistency_verified",
+                "log" => log_name.to_string(),
+                "source_id" => source_id.to_string()
+            )
+            .increment(1);
+            *last = Some((new_size, new_root));
+            Ok(())
+        }
+        // Could not read enough of the tree to decide. Near the head that is
+        // routinely the log having moved past the partial-tile widths this
+        // checkpoint implies.
+        //
+        // The anchor deliberately stays where it is. Moving it to an unproven
+        // tree would skip that transition permanently: the next check would
+        // prove B→C and nothing would ever prove A→B. Holding the anchor means
+        // the next attempt proves A→C instead, which covers the gap.
+        crate::ct::merkle::Verdict::Unavailable(reason) => {
+            metrics::counter!(
+                "certstream_static_ct_consistency_unavailable",
+                "log" => log_name.to_string(),
+                "source_id" => source_id.to_string()
+            )
+            .increment(1);
+            debug!(
+                log = %log_name,
+                reason = %reason,
+                anchor_size = old_size,
+                "consistency proof unavailable; keeping the last verified tree as the anchor"
+            );
+            Ok(())
+        }
+        crate::ct::merkle::Verdict::Mismatch(reason) => {
+            metrics::counter!(
+                "certstream_static_ct_consistency_failed",
+                "log" => log_name.to_string(),
+                "source_id" => source_id.to_string()
+            )
+            .increment(1);
+            Err(reason)
+        }
+    }
+}
+
+/// Whether to ingest under this checkpoint, and what its signature check
+/// found. The two differ: `warn` mode ingests a checkpoint whose signature
+/// failed, and a consumer is entitled to know that.
+struct CheckpointSignature {
+    accepted: bool,
+    state: VerificationState,
+}
+
 fn accept_checkpoint_signature(
     checkpoint_text: &str,
     expected_origin: &str,
@@ -260,7 +387,7 @@ fn accept_checkpoint_signature(
     log_desc: &str,
     log_name: &str,
     source_id: &str,
-) -> bool {
+) -> CheckpointSignature {
     match verify_checkpoint_signature(checkpoint_text, expected_origin, key_b64) {
         SigCheck::Verified => {
             metrics::counter!(
@@ -269,7 +396,10 @@ fn accept_checkpoint_signature(
                 "source_id" => source_id.to_string()
             )
             .increment(1);
-            true
+            CheckpointSignature {
+                accepted: true,
+                state: VerificationState::Verified,
+            }
         }
         SigCheck::Unverifiable(reason) => {
             metrics::counter!(
@@ -279,7 +409,10 @@ fn accept_checkpoint_signature(
             )
             .increment(1);
             debug!(log = %log_desc, reason, "checkpoint signature not verifiable; accepting");
-            true
+            CheckpointSignature {
+                accepted: true,
+                state: VerificationState::Unverified,
+            }
         }
         SigCheck::Failed(reason) => {
             metrics::counter!(
@@ -291,11 +424,17 @@ fn accept_checkpoint_signature(
             match mode {
                 CheckpointSignatureMode::Enforce => {
                     warn!(log = %log_desc, reason, "checkpoint signature verification failed; rejecting (enforce mode)");
-                    false
+                    CheckpointSignature {
+                        accepted: false,
+                        state: VerificationState::Failed,
+                    }
                 }
                 CheckpointSignatureMode::Warn => {
                     warn!(log = %log_desc, reason, "checkpoint signature verification failed; accepting (warn mode)");
-                    true
+                    CheckpointSignature {
+                        accepted: true,
+                        state: VerificationState::Failed,
+                    }
                 }
             }
         }
@@ -376,6 +515,9 @@ fn parse_one_leaf(data: &Bytes, offset: &mut usize) -> Option<TileLeaf> {
     if *offset + 10 > data.len() {
         return None;
     }
+    // The TimestampedEntry runs from here to the end of the extensions field,
+    // in both entry shapes.
+    let entry_start = *offset;
 
     let submission_timestamp = u64::from_be_bytes(data[*offset..*offset + 8].try_into().ok()?);
     *offset += 8;
@@ -427,6 +569,7 @@ fn parse_one_leaf(data: &Bytes, offset: &mut usize) -> Option<TileLeaf> {
         }
         let leaf_index = parse_leaf_index_ext(&data[*offset..*offset + ext_len]);
         *offset += ext_len;
+        let timestamped_entry = data.slice(entry_start..*offset);
 
         if *offset + 3 > data.len() {
             return None;
@@ -449,6 +592,7 @@ fn parse_one_leaf(data: &Bytes, offset: &mut usize) -> Option<TileLeaf> {
             is_precert,
             chain_fingerprints,
             leaf_index,
+            timestamped_entry,
         });
     } else {
         return None;
@@ -464,6 +608,7 @@ fn parse_one_leaf(data: &Bytes, offset: &mut usize) -> Option<TileLeaf> {
     }
     let leaf_index = parse_leaf_index_ext(&data[*offset..*offset + ext_len]);
     *offset += ext_len;
+    let timestamped_entry = data.slice(entry_start..*offset);
 
     let chain_fingerprints = read_chain_fingerprints(data, offset)?;
 
@@ -474,6 +619,7 @@ fn parse_one_leaf(data: &Bytes, offset: &mut usize) -> Option<TileLeaf> {
         is_precert,
         chain_fingerprints,
         leaf_index,
+        timestamped_entry,
     })
 }
 
@@ -593,7 +739,7 @@ fn full_tile_floor(tree_size: u64) -> u64 {
     (tree_size / 256) * 256
 }
 
-/// Issue #10: `fingerprint` is used directly as the cache key — no hex String on cache hit.
+/// Keyed on the raw fingerprint bytes, so a cache hit renders no hex string.
 /// Only on a cache miss do we compute the hex string for the HTTP URL.
 ///
 /// The fetched DER is parsed once here and cached as `Arc<ChainCert>`;
@@ -667,7 +813,7 @@ const MAX_DECOMPRESSED_TILE_BYTES: u64 = 16 * 1024 * 1024;
 /// decompressed stream would exceed the cap (caller must check the slice's
 /// length against the original `data.len()` if it wants to discriminate).
 ///
-/// Pre-1.5.0 used `read_to_end` with no cap — a hostile or buggy CDN could
+/// An uncapped `read_to_end` here would let a hostile or buggy CDN
 /// serve a small gzip stream that expanded to gigabytes and OOM'd the
 /// process.
 pub fn decompress_tile(data: &[u8]) -> Cow<'_, [u8]> {
@@ -716,6 +862,8 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         tracker,
         shutdown,
         dedup,
+        filters,
+        nats,
         rate_limiter,
         streams,
         issuer_cache: shared_issuer_cache,
@@ -738,7 +886,56 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
     let source = Arc::new(Source {
         name: Arc::from(log.description.as_str()),
         url: Arc::from(base_url.as_str()),
+        log_id: log.log_id.as_deref().map(Arc::from),
+        operator: Arc::from(log.operator_name()),
+        log_type: "static_ct",
     });
+    // Updated from the checkpoint this watcher is currently reading under.
+    let mut verification = crate::models::Verification::default();
+
+    // Durable output. The subject carries operator and log so a consumer can
+    // subscribe to one of either instead of the whole feed; the message id
+    // prefix is the log's identity, so a re-read after a restart republishes
+    // under the same id and is deduplicated by the server.
+    let nats_subject = nats.as_ref().map(|_| {
+        format!(
+            "certstream.{}.{}",
+            subject_token(&log.operator),
+            subject_token(&log.description)
+        )
+    });
+    let log_id_for_msgs: Arc<str> = Arc::from(
+        log.log_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(base_url.as_str()),
+    );
+
+    // Merkle verification state. `tile_reader` is built once per watcher so
+    // its verified-tile cache survives across checkpoints; the previous
+    // checkpoint is held in memory only, so consistency checking starts from
+    // the first checkpoint of this process rather than from a stored root.
+    let merkle_mode = config.merkle_verification;
+    let tile_reader = merkle_mode.checks_consistency().then(|| {
+        Arc::new(crate::ct::merkle::HttpTileReader::new(
+            &base_url,
+            client.clone(),
+            Duration::from_secs(config.request_timeout_secs),
+            tokio::runtime::Handle::current(),
+            rate_limiter.clone(),
+        ))
+    });
+    let mut last_verified_tree: Option<(u64, tlog_tiles::Hash)> = None;
+
+    // Names-tiles mode. `None` until the first tile fetch settles it: a log
+    // that serves the extension is read that way from then on, one that 404s
+    // falls back to data tiles permanently rather than probing every poll.
+    let names_mode = config.names_tiles == crate::config::NamesTiles::Prefer;
+    let mut serves_names_tiles: Option<bool> = if names_mode { None } else { Some(false) };
+    // Root of the checkpoint the current drain is reading under. Inclusion is
+    // proven against this exact tree, not against whatever the head is by the
+    // time the tile lands.
+    let mut last_checkpoint_root = String::new();
 
     metrics::gauge!(
         "certstream_ct_runtime_log_info",
@@ -751,17 +948,15 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
     .set(1.0);
 
     let health = Arc::new(LogHealth::new());
-    // P1 fix: use the SHARED issuer cache from WatcherContext instead of
-    // allocating a fresh per-watcher cache. With 55 static-CT logs this
-    // was up to 55 × 10K entries (~500 MiB worst case); now a single
-    // 10K-entry cache amortises issuer DERs across all logs of the same
-    // operator (and across different operators sharing a root).
+    // The shared cache from WatcherContext, not a per-watcher one: a
+    // 10K-entry cache per log across ~55 static-CT logs would hold the same
+    // issuer DERs many times over.
     let issuer_cache: Arc<IssuerCache> = shared_issuer_cache;
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
     let timeout = Duration::from_secs(config.request_timeout_secs);
     let fetch_concurrency = config.fetch_concurrency.max(1) as usize;
 
-    // Issue #3: Pre-register metric handles — no String allocation per certificate.
+    // Registered once, with their labels, so the hot loop allocates none.
     let counter_tiles = metrics::counter!(
         "certstream_static_ct_tiles_fetched",
         "log" => log_name.clone(),
@@ -855,7 +1050,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                     Ok(resp) => match resp.text().await {
                         Ok(text) => match parse_checkpoint(&text, &expected_origin) {
                             Some(cp) => {
-                                if accept_checkpoint_signature(
+                                let sig = accept_checkpoint_signature(
                                     &text,
                                     &expected_origin,
                                     log.key.as_deref(),
@@ -863,7 +1058,9 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                                     &log.description,
                                     &log_name,
                                     &source_id,
-                                ) {
+                                );
+                                verification.checkpoint_signature = sig.state;
+                                if sig.accepted {
                                     Ok(cp.tree_size)
                                 } else {
                                     Err("checkpoint signature rejected".to_string())
@@ -918,6 +1115,12 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         );
         start
     };
+
+    // The durable output's acknowledged position starts where this watcher
+    // does, so the contiguous prefix has something to grow from.
+    if let Some(sink) = &nats {
+        sink.acks.resume_at(&base_url, current_index);
+    }
 
     loop {
         if shutdown.is_cancelled() {
@@ -1005,7 +1208,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                     match resp.text().await {
                         Ok(text) => match parse_checkpoint(&text, &expected_origin) {
                             Some(cp) => {
-                                if !accept_checkpoint_signature(
+                                let sig = accept_checkpoint_signature(
                                     &text,
                                     &expected_origin,
                                     log.key.as_deref(),
@@ -1013,16 +1216,47 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                                     &log.description,
                                     &log_name,
                                     &source_id,
-                                ) {
+                                );
+                                verification.checkpoint_signature = sig.state;
+                                if !sig.accepted {
                                     health.record_failure(config.unhealthy_threshold);
                                     counter_checkpoint_errors.increment(1);
                                     sleep(health.get_backoff()).await;
                                     continue;
                                 }
+
+                                if let Some(reader) = &tile_reader {
+                                    match check_tree_consistency(
+                                        reader,
+                                        &mut last_verified_tree,
+                                        &cp,
+                                        &log_name,
+                                        &source_id,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {}
+                                        Err(e) => {
+                                            // A log that cannot prove it only
+                                            // appended is not one to keep
+                                            // reading from on this poll.
+                                            warn!(
+                                                log = %log.description,
+                                                error = %e,
+                                                "consistency verification failed; skipping this checkpoint"
+                                            );
+                                            health.record_failure(config.unhealthy_threshold);
+                                            sleep(health.get_backoff()).await;
+                                            continue;
+                                        }
+                                    }
+                                }
+
                                 if was_unhealthy {
                                     info!(log = %log.description, "health check passed (static CT), resuming");
                                 }
                                 health.record_success(config.healthy_threshold);
+                                last_checkpoint_root = cp.root_hash.clone();
                                 cp.tree_size
                             }
                             None => {
@@ -1114,6 +1348,12 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
         'tile_loop: while current_index < tree_size && !shutdown.is_cancelled() {
             use futures::StreamExt as _;
 
+            // Copied out before the fetch stream borrows the environment.
+            // Unknown (the first tile of a names-mode watcher) optimistically
+            // asks for names; a 404 settles it and the next drain uses data
+            // tiles.
+            let want_names = serves_names_tiles.unwrap_or(names_mode);
+
             let end_tile = (tree_size.saturating_sub(1)) / 256;
             let first_tile = current_index / 256;
 
@@ -1136,7 +1376,11 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 let client = client.clone();
                 let limiter = rate_limiter.clone();
                 let desc = log.description.clone();
-                let url = tile_url(&base_url, 0, tile_index, partial_width);
+                let url = if want_names {
+                    crate::ct::names_tiles::names_tile_url(&base_url, tile_index, partial_width)
+                } else {
+                    tile_url(&base_url, 0, tile_index, partial_width)
+                };
                 async move {
                     // Respect per-operator rate limit before making request
                     if let Some(ref l) = limiter {
@@ -1173,6 +1417,14 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 let raw_data = match outcome {
                     super::FetchOutcome::Body(b) => b,
                     super::FetchOutcome::Http(status, retry_after) => {
+                        if serves_names_tiles.is_none() && status.as_u16() == 404 {
+                            info!(
+                                log = %log.description,
+                                "log does not serve names tiles; using data tiles"
+                            );
+                            serves_names_tiles = Some(false);
+                            continue;
+                        }
                         if let Some(retry_after_ms) = retry_after {
                             health.record_rate_limit_with_ms(
                                 config.unhealthy_threshold,
@@ -1203,6 +1455,63 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
 
                 health.record_success(config.healthy_threshold);
                 counter_tiles.increment(1);
+
+                if want_names {
+                    if serves_names_tiles.is_none() {
+                        info!(log = %log.description, "reading names tiles (unauthenticated)");
+                        serves_names_tiles = Some(true);
+                    }
+
+                    let tile_start_index = tile_index * 256;
+                    let skip = current_index.saturating_sub(tile_start_index) as usize;
+                    let slots = match tokio::task::spawn_blocking(move || {
+                        crate::ct::names_tiles::parse_names_tile(raw_data)
+                    })
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                        Err(_) => break 'tile_loop,
+                    };
+
+                    // A names tile holds one line per entry of the equivalent
+                    // data tile. A short tile means a truncated fetch or a
+                    // stale partial; advancing over it would skip entries that
+                    // were never read.
+                    if (slots.len() as u64) != entries_in_tile {
+                        warn!(
+                            log = %log.description,
+                            tile = tile_index,
+                            got = slots.len(),
+                            expected = entries_in_tile,
+                            "names tile entry count mismatch; skipping"
+                        );
+                        health.record_failure(config.unhealthy_threshold);
+                        sleep(health.get_backoff()).await;
+                        break 'tile_loop;
+                    }
+
+                    // `skip` counts entry slots, so the parser has to keep an
+                    // empty slot for every line it could not use.
+                    for entry in slots.into_iter().skip(skip).flatten() {
+                        if !dedup.is_new(&crate::ct::names_tiles::dedup_key(&entry)) {
+                            continue;
+                        }
+                        counter_entries_parsed.increment(1);
+                        crate::ct::broadcast_names(&entry, &tx, &stats, &counter_messages);
+                    }
+
+                    current_index = tile_start_index + entries_in_tile;
+                    state_manager.update_index(&base_url, current_index, tree_size);
+                    tracker.update(
+                        &base_url,
+                        health.status(),
+                        current_index,
+                        tree_size,
+                        health.total_errors(),
+                    );
+                    continue;
+                }
 
                 // Decompression (up to 16 MiB) + tile parsing is
                 // pure CPU with no yield points — run it on the
@@ -1254,6 +1563,88 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 }
 
                 let tile_start_index = tile_index * 256;
+
+                // Inclusion: prove the entries about to be broadcast are the
+                // ones the signed tree holds at those indexes. Done before the
+                // broadcast, so a tile that cannot be proven is never emitted.
+                if merkle_mode.checks_inclusion()
+                    && let Some(reader) = &tile_reader
+                {
+                    let claims: Vec<(u64, Bytes)> = leaves
+                        .iter()
+                        .enumerate()
+                        .map(|(i, leaf)| {
+                            (tile_start_index + i as u64, leaf.timestamped_entry.clone())
+                        })
+                        .collect();
+                    let reader = Arc::clone(reader);
+                    let root = match crate::ct::merkle::parse_root_hash(&last_checkpoint_root) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            warn!(log = %log.description, error = %e, "cannot verify inclusion");
+                            break 'tile_loop;
+                        }
+                    };
+                    let verdict = tokio::task::spawn_blocking(move || {
+                        crate::ct::merkle::verify_inclusion(&reader, tree_size, root, &claims)
+                    })
+                    .await;
+                    let verdict = match verdict {
+                        Ok(v) => v,
+                        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                        Err(_) => break 'tile_loop,
+                    };
+                    match verdict {
+                        crate::ct::merkle::Verdict::Verified => {
+                            metrics::counter!(
+                                "certstream_static_ct_inclusion_verified",
+                                "log" => log_name.clone(),
+                                "source_id" => source_id.clone()
+                            )
+                            .increment(leaves.len() as u64);
+                            verification.inclusion =
+                                crate::models::VerificationState::Verified;
+                        }
+                        // The tree could not be read, which is not evidence
+                        // against the tile. Deliver it saying so, rather than
+                        // dropping data every time the log rate-limits us or
+                        // moves past a partial tile.
+                        crate::ct::merkle::Verdict::Unavailable(reason) => {
+                            metrics::counter!(
+                                "certstream_static_ct_inclusion_unavailable",
+                                "log" => log_name.clone(),
+                                "source_id" => source_id.clone()
+                            )
+                            .increment(1);
+                            debug!(
+                                log = %log.description,
+                                tile = tile_index,
+                                reason = %reason,
+                                "inclusion proof unavailable"
+                            );
+                            verification.inclusion =
+                                crate::models::VerificationState::Unverified;
+                        }
+                        crate::ct::merkle::Verdict::Mismatch(reason) => {
+                            warn!(
+                                log = %log.description,
+                                tile = tile_index,
+                                error = %reason,
+                                "tile does not match the signed tree; dropping it"
+                            );
+                            metrics::counter!(
+                                "certstream_static_ct_inclusion_failed",
+                                "log" => log_name.clone(),
+                                "source_id" => source_id.clone()
+                            )
+                            .increment(1);
+                            health.record_failure(config.unhealthy_threshold);
+                            sleep(health.get_backoff()).await;
+                            break 'tile_loop;
+                        }
+                    }
+                }
+
                 let offset_in_tile = if current_index > tile_start_index {
                     (current_index - tile_start_index) as usize
                 } else {
@@ -1318,6 +1709,8 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 let job_cache = Arc::clone(&cache);
                 let job_stats = Arc::clone(&stats);
                 let job_streams = Arc::clone(&streams);
+                let job_retain_leaf = filters.active();
+                let job_verification = verification;
                 let job_source = Arc::clone(&source);
                 let job_issuer_cache = Arc::clone(&issuer_cache);
                 let job_counter_messages = counter_messages.clone();
@@ -1333,7 +1726,22 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                 // Identical for every leaf in the tile — format once.
                 let tile_cert_link =
                     format!("{}/tile/data/{}", base_url, encode_tile_path(tile_index));
+                let job_durable = nats.is_some();
+                let job_nats_subject = nats_subject.clone().unwrap_or_default();
+                let job_log_url: Arc<str> = Arc::from(base_url.as_str());
+                let job_log_key = log_id_for_msgs.clone();
                 let join = tokio::task::spawn_blocking(move || {
+                    let mut newest_submission = 0.0f64;
+                    let mut durable: Vec<crate::nats::Record> = Vec::new();
+                    let mut skipped: Vec<u64> = Vec::new();
+                    let targets = crate::ct::BroadcastTargets {
+                        tx: &job_tx,
+                        cache: &job_cache,
+                        stats: &job_stats,
+                        messages_counter: &job_counter_messages,
+                        streams: &job_streams,
+                        retain_leaf: job_retain_leaf,
+                    };
                     for (i, leaf) in leaves.into_iter().enumerate().skip(offset_in_tile) {
                         let cert_index = tile_start_index + i as u64;
 
@@ -1363,22 +1771,29 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                             None => {
                                 debug!(log = %job_log_name, index = cert_index, "skipped unparseable cert (static CT)");
                                 job_counter_parse_failures.increment(1);
+                                // Nothing will ever be published for this
+                                // index, so settle it or the durable position
+                                // stops here.
+                                skipped.push(cert_index);
                                 continue;
                             }
                         };
 
                         job_counter_entries_parsed.increment(1);
 
-                        if !job_dedup.is_new(&parsed.sha256_raw) {
+                        let is_new = job_dedup.is_new(&parsed.sha256_raw);
+                        if !is_new && !job_durable {
                             continue;
                         }
 
                         let seen = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+                        newest_submission =
+                            newest_submission.max(leaf.submission_timestamp as f64 / 1000.0);
                         // Chain certs are only serialized by the `full`
                         // stream; the cache hands back pre-parsed
                         // Arc<ChainCert>s, so this is a refcount bump
                         // per issuer instead of a re-parse per leaf.
-                        let chain: Vec<Arc<ChainCert>> = if full_stream_enabled {
+                        let chain: Vec<Arc<ChainCert>> = if is_new && full_stream_enabled {
                             leaf.chain_fingerprints
                                 .iter()
                                 // Pre-warm above already issued a concurrent
@@ -1398,7 +1813,7 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                             Cow::Borrowed("X509LogEntry")
                         };
 
-                        // Issue #2: wrap in Arc once; share between CachedCert and CertificateData.
+                        // Wrapped once and shared with the cache entry.
                         let leaf_arc = Arc::new(parsed);
                         let cached = build_cached_cert(
                             Arc::clone(&leaf_arc),
@@ -1417,17 +1832,32 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                                 seen,
                                 submission_timestamp: leaf.submission_timestamp as f64 / 1000.0,
                                 source: Arc::clone(&job_source),
+                                verification: job_verification,
                             },
                         };
-                        broadcast_cert(
-                            msg,
-                            &job_tx,
-                            &job_cache,
-                            cached,
-                            &job_stats,
-                            &job_counter_messages,
-                            &job_streams,
-                        );
+                        // Published before the live dedup is applied. Dedup
+                        // collapses one certificate seen in several logs, but
+                        // a durable record is addressed by (log_id, index) —
+                        // each log's entry is a distinct record, and dropping
+                        // the second one would leave a permanent hole in that
+                        // log's position. JetStream deduplicates identical
+                        // republishes by message id.
+                        if job_durable {
+                            match msg.to_v2_json() {
+                                Ok(json) => durable.push(crate::nats::Record {
+                                    log_url: Arc::clone(&job_log_url),
+                                    msg_id: format!("{job_log_key}:{cert_index}"),
+                                    index: cert_index,
+                                    subject: job_nats_subject.clone(),
+                                    payload: bytes::Bytes::from(json),
+                                }),
+                                Err(_) => skipped.push(cert_index),
+                            }
+                        }
+
+                        if is_new {
+                            broadcast_cert(msg, cached, &targets);
+                        }
                     }
 
                     // Checkpoint INSIDE the job: if the supervisor's
@@ -1436,6 +1866,12 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                     // blocking task still runs to completion — the
                     // broadcasts above and this index persist stay
                     // atomic, so a restart doesn't replay the tile.
+                    crate::ct::record_ingest_delay(
+                        &job_log_name,
+                        newest_submission,
+                        chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
+                    );
+
                     let next_index = ((tile_index + 1) * 256).min(tree_size);
                     job_state_manager.update_index(&job_base_url, next_index, tree_size);
                     job_tracker.update(
@@ -1445,9 +1881,23 @@ pub async fn run_static_ct_watcher(log: CtLog, ctx: WatcherContext) {
                         tree_size,
                         job_health.total_errors(),
                     );
+                    (durable, skipped)
                 });
                 match join.await {
-                    Ok(()) => {}
+                    Ok((durable, skipped)) => {
+                        // Queued after the broadcast, awaited before the next
+                        // tile: under `on_full: block` this is where ingest
+                        // slows down to match durable storage.
+                        if let Some(sink) = &nats {
+                            let log_key: Arc<str> = Arc::from(base_url.as_str());
+                            for index in skipped {
+                                sink.acks.record_skipped(&log_key, index);
+                            }
+                            for record in durable {
+                                sink.publish(record).await;
+                            }
+                        }
+                    }
                     Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
                     Err(_) => break 'tile_loop,
                 }
@@ -1645,11 +2095,10 @@ mod tests {
         assert_eq!(cache.get(&fp).unwrap().unwrap().serial_number, "new");
     }
 
-    /// Regression for #6: pre-1.5.0 each leaf in the per-tile loop went
-    /// through `fetch_issuer(...).await` even after the pre-warm `join_all`
-    /// populated the cache. The per-leaf path now reads
-    /// `issuer_cache.get(fp)` directly, so for any one fingerprint we hit
-    /// the network *at most once* per cache lifetime.
+    /// One fingerprint costs at most one network fetch per cache lifetime.
+    /// The per-leaf path reads the cache directly; calling `fetch_issuer` per
+    /// leaf instead would spend an HTTP request per chain entry per leaf even
+    /// with the value already cached.
     #[tokio::test]
     async fn issuer_fetch_hits_network_at_most_once_per_fingerprint() {
         use std::net::SocketAddr;
@@ -1732,9 +2181,7 @@ mod tests {
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
-            "second fetch_issuer with cached fp must NOT hit the network — \
-             pre-1.5.0 the per-leaf hot loop burned an HTTP request per chain \
-             entry per leaf even when the cache had the value"
+            "a second fetch_issuer for a cached fingerprint must not hit the network"
         );
 
         let fp2 = [0xcd; 32];
@@ -1952,9 +2399,9 @@ mod tests {
 
     #[test]
     fn test_parse_tile_leaves_long_chain_recovers_full_count() {
-        // Regression: the chain field is `Fingerprint<0..2^16-1>` — a byte-length
-        // prefix, not a fingerprint count. A pre-1.4 bug treated the prefix as
-        // a count, consuming subsequent leaves' bytes as fingerprint data.
+        // The chain field is `Fingerprint<0..2^16-1>`: a byte-length prefix,
+        // not a fingerprint count. Reading it as a count consumes the
+        // following leaves' bytes as fingerprint data.
         let chain: Vec<[u8; 32]> = (0..64).map(|i| [i as u8; 32]).collect();
         let mut data = Vec::new();
         data.extend_from_slice(&build_x509_entry(1, b"a", &chain));
@@ -2201,7 +2648,7 @@ mod tests {
     #[test]
     fn accept_enforce_rejects_failed_signature() {
         let tampered = WILLOW_CHECKPOINT.replace("1237717073", "1237717074");
-        let accepted = accept_checkpoint_signature(
+        let outcome = accept_checkpoint_signature(
             &tampered,
             WILLOW_ORIGIN,
             Some(WILLOW_KEY_B64),
@@ -2210,13 +2657,13 @@ mod tests {
             "test-log",
             "src-1",
         );
-        assert!(!accepted, "enforce mode must reject an invalid signature");
+        assert!(!outcome.accepted, "enforce mode must reject an invalid signature");
     }
 
     #[test]
     fn accept_warn_accepts_failed_signature() {
         let tampered = WILLOW_CHECKPOINT.replace("1237717073", "1237717074");
-        let accepted = accept_checkpoint_signature(
+        let outcome = accept_checkpoint_signature(
             &tampered,
             WILLOW_ORIGIN,
             Some(WILLOW_KEY_B64),
@@ -2225,13 +2672,13 @@ mod tests {
             "test-log",
             "src-1",
         );
-        assert!(accepted, "warn mode must accept even an invalid signature");
+        assert!(outcome.accepted, "warn mode must accept even an invalid signature");
     }
 
     #[test]
     fn accept_enforce_accepts_unverifiable() {
         // No key → unverifiable → accepted even under enforce (can't verify is not forgery).
-        let accepted = accept_checkpoint_signature(
+        let outcome = accept_checkpoint_signature(
             WILLOW_CHECKPOINT,
             WILLOW_ORIGIN,
             None,
@@ -2241,14 +2688,14 @@ mod tests {
             "src-1",
         );
         assert!(
-            accepted,
+            outcome.accepted,
             "enforce must still accept an unverifiable checkpoint"
         );
     }
 
     #[test]
     fn accept_verified_signature() {
-        let accepted = accept_checkpoint_signature(
+        let outcome = accept_checkpoint_signature(
             WILLOW_CHECKPOINT,
             WILLOW_ORIGIN,
             Some(WILLOW_KEY_B64),
@@ -2257,6 +2704,6 @@ mod tests {
             "test-log",
             "src-1",
         );
-        assert!(accepted, "a valid signature must be accepted");
+        assert!(outcome.accepted, "a valid signature must be accepted");
     }
 }

@@ -52,7 +52,7 @@ Use a custom prefix to avoid installing under `/usr/local`:
 curl -fsSL https://raw.githubusercontent.com/reloading01/certstream-server-rust/main/install.sh | PREFIX="$HOME/.local" sh
 ```
 
-Pin a release with `VERSION`, for example `VERSION=v1.5.6`.
+Pin a release with `VERSION`, for example `VERSION=v1.6.0`.
 
 ### Homebrew
 
@@ -206,6 +206,12 @@ rate_limit:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `CERTSTREAM_CT_LOG_STATE_FILE` | `certstream_state.json` | State file path |
+| `CERTSTREAM_CT_LOG_STATE_RECOVERY` | `fresh` | Behaviour on an unreadable state file: `fresh` or `fail` |
+| `CERTSTREAM_CT_LOG_REFRESH_INTERVAL_SECS` | `3600` | Log-list refresh interval while running; `0` disables it |
+| `CERTSTREAM_CT_LOG_REMOVED_POLICY` | `stop` | What a refresh does with a delisted log: `stop` or `keep` |
+| `CERTSTREAM_STATIC_CT_MERKLE_VERIFICATION` | `off` | Merkle verification depth: `off`, `consistency`, `full` |
+| `CERTSTREAM_STATIC_CT_NAMES_TILES` | `off` | Read names tiles where served: `off` or `prefer` |
+| `CERTSTREAM_NATS_ENABLED` | `false` | Durable output to NATS JetStream |
 | `CERTSTREAM_CT_LOG_RETRY_MAX_ATTEMPTS` | `3` | Maximum retry attempts |
 | `CERTSTREAM_CT_LOG_REQUEST_TIMEOUT_SECS` | `30` | Request timeout |
 | `CERTSTREAM_CT_LOG_BATCH_SIZE` | `1024` | Requested entries per `get-entries` call; servers may clamp it |
@@ -277,8 +283,11 @@ This does not increase the configured outbound request rate. The per-operator to
 | `ws://host:8080/` | Lite |
 | `ws://host:8080/full-stream` | Full data with DER and chain |
 | `ws://host:8080/domains-only` | Domain names only |
+| `ws://host:8080/v2` | Version 2 output; off by default |
 
 The domains-only stream uses `message_type: "dns_entries"` and returns `data` as a string array.
+
+All streaming endpoints accept `domain` and `issuer` query parameters for server-side filtering. Version 2 adds an explicit source address and a record of what was verified. `--backfill` replays a fixed index range to JSONL. See the [documentation](https://certstream.dev/docs.html) for all of it.
 
 ### SSE
 
@@ -289,6 +298,7 @@ SSE is disabled by default. Enable it with `CERTSTREAM_SSE_ENABLED=true`.
 | `http://host:8080/sse` | Lite |
 | `http://host:8080/sse?stream=full` | Full |
 | `http://host:8080/sse?stream=domains` | Domains only |
+| `http://host:8080/sse?stream=v2` | Version 2 output; off by default |
 
 ### HTTP endpoints
 

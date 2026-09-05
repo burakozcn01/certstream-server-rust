@@ -1,5 +1,6 @@
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -24,20 +25,34 @@ const DEFAULT_TTL_SECS: u64 = 900;
 // allocator a chance to release pages sooner.
 const DEFAULT_CLEANUP_INTERVAL_SECS: u64 = 15;
 
-/// Issue #1: Use raw [u8; 32] SHA-256 bytes as the key — fixed-size, stack-allocated,
-/// trivially hashable. Eliminates one heap allocation per certificate on every lookup.
+/// Keyed on the raw 32-byte SHA-256 rather than its hex form, so a lookup
+/// needs no allocation.
 ///
-/// The key is already a uniformly-distributed SHA-256 digest, so the map's
-/// hasher only needs to fold it into a u64 — ahash does that in a few cycles,
-/// vs SipHash's full keyed permutation on every lookup.
+/// The key is already a uniformly-distributed SHA-256 digest, so the map only
+/// needs to fold it into a u64. ahash rather than the default SipHash for
+/// that reason: the input needs no further mixing.
 pub struct DedupFilter {
     seen: DashMap<[u8; 32], Instant, ahash::RandomState>,
     /// Upper bound on entries. Enforced by `cleanup`, which narrows the
-    /// effective TTL window when the map overshoots, so the bound costs
-    /// nothing on the insert path.
+    /// eviction window when the map overshoots, so the bound costs nothing on
+    /// the insert path.
     capacity: usize,
+    /// Configured window. The eviction window never exceeds this.
     ttl: Duration,
+    /// Eviction window currently in force, in milliseconds. Carried between
+    /// sweeps: recomputing it from `ttl` every sweep makes the bound a
+    /// stateless map from size to window rather than a loop that converges,
+    /// and the map then settles well above `capacity` (see `cleanup`).
+    window_ms: AtomicU64,
 }
+
+/// Floor on the eviction window, there only to stop it collapsing to zero and
+/// disabling dedup outright. Deliberately small: `capacity` is what the
+/// operator configured, so it should win over the window in any realistic
+/// deployment. A rate high enough that `rate × MIN_WINDOW_MS` still exceeds
+/// `capacity` cannot satisfy both, and shows up as
+/// `certstream_dedup_effective_ttl_seconds` pinned at this value.
+const MIN_WINDOW_MS: u64 = 100;
 
 impl DedupFilter {
     pub fn new() -> Self {
@@ -52,6 +67,7 @@ impl DedupFilter {
             ),
             capacity: capacity.max(1),
             ttl,
+            window_ms: AtomicU64::new(ttl.as_millis().max(1) as u64),
         }
     }
 
@@ -92,30 +108,39 @@ impl DedupFilter {
         let before = self.seen.len();
         let now = Instant::now();
 
-        // `capacity` used to bound nothing: TTL was the only thing pruning the
-        // map, so the steady-state size was ingest rate × TTL. Measured on the
-        // live workload that is ~420 certs/s × 900 s = ~354K entries against a
-        // configured 200K, so anyone sizing memory from `capacity` was out by
-        // that factor.
+        // The map is bounded by narrowing the eviction window rather than by
+        // evicting oldest-first, which would need the ages sorted and so an
+        // allocation proportional to the map. Narrowing rides along on the
+        // sweep that already walks every entry, and can only let more
+        // duplicates through, never fewer — an over-capacity filter loses
+        // dedup depth, not correctness.
         //
-        // Rather than evicting oldest-first (which needs the ages sorted, an
-        // allocation proportional to the map) the window itself is narrowed in
-        // proportion to the overshoot: keeping 200K of 354K entries means
-        // keeping the newest ~56% of the TTL window. Arrival is close enough to
-        // uniform across a 15-minute window that this lands within a few
-        // percent of exact oldest-first eviction, and it rides along on the
-        // sweep that already walks every entry.
-        //
-        // Narrowing the window can only let more duplicates through, never
-        // fewer, so an over-capacity filter degrades in dedup depth and never
-        // in correctness.
-        let effective_ttl = if before > self.capacity {
+        // The window is carried between sweeps and adjusted from its current
+        // value. Deriving it from `ttl` each sweep instead does not converge:
+        // a sweep that finds the map within capacity restores the full window,
+        // the map refills to rate × ttl, the next sweep narrows again, and the
+        // size oscillates around sqrt(rate × ttl × capacity). Measured on the
+        // live workload at ~330 certs/s that is ~250K entries against a
+        // configured 200K, and it grows with the square root of the ingest
+        // rate — so the configured bound did not bound.
+        let configured_ms = self.ttl.as_millis().max(1) as u64;
+        let mut window_ms = self
+            .window_ms
+            .load(Ordering::Relaxed)
+            .clamp(MIN_WINDOW_MS.min(configured_ms), configured_ms);
+
+        if before > self.capacity {
             let ratio = self.capacity as f64 / before as f64;
+            window_ms = ((window_ms as f64 * ratio) as u64).max(MIN_WINDOW_MS.min(configured_ms));
             metrics::counter!("certstream_dedup_capacity_trims").increment(1);
-            self.ttl.mul_f64(ratio)
-        } else {
-            self.ttl
-        };
+        } else if window_ms < configured_ms {
+            // Room again. Widen back toward the configured window so dedup
+            // depth recovers when the ingest rate falls, gradually so a map
+            // hovering at capacity does not oscillate.
+            window_ms = (window_ms + window_ms / 8 + 1).min(configured_ms);
+        }
+        self.window_ms.store(window_ms, Ordering::Relaxed);
+        let effective_ttl = Duration::from_millis(window_ms);
 
         self.seen
             .retain(|_, v| now.duration_since(*v) < effective_ttl);
@@ -205,6 +230,7 @@ mod tests {
         let filter = DedupFilter {
             seen: DashMap::with_capacity_and_hasher(100, ahash::RandomState::default()),
             capacity: DEFAULT_CAPACITY,
+            window_ms: AtomicU64::new(Duration::from_secs(DEFAULT_TTL_SECS).as_millis() as u64),
             ttl: Duration::from_millis(50),
         };
 
@@ -219,6 +245,73 @@ mod tests {
     }
 
     #[test]
+    fn sustained_load_stays_near_capacity() {
+        // Sustained arrival is what the bound has to survive: a burst is
+        // trimmed by any narrowing rule, but a steady rate is where a
+        // non-converging one settles above capacity and stays there.
+        const CAPACITY: usize = 100;
+        const PER_ROUND: usize = 40;
+        const ROUNDS: usize = 20;
+        let ttl = Duration::from_secs(2);
+        let filter = DedupFilter::with_config(CAPACITY, ttl);
+
+        let mut key = [0u8; 32];
+        let mut seq: u64 = 0;
+        let mut sizes = Vec::new();
+        for _ in 0..ROUNDS {
+            for _ in 0..PER_ROUND {
+                seq += 1;
+                key[..8].copy_from_slice(&seq.to_be_bytes());
+                filter.is_new(&key);
+            }
+            std::thread::sleep(Duration::from_millis(80));
+            filter.cleanup();
+            sizes.push(filter.len());
+        }
+
+        // Arrival here is ~500/s against a 2 s window, so leaving the window
+        // at the configured TTL would hold ~1000 entries, and recomputing it
+        // from the TTL each sweep settles around sqrt(500 * 2 * 100) ≈ 316.
+        // Converging on the window in force holds capacity plus one sweep's
+        // arrivals.
+        let settled = &sizes[ROUNDS / 2..];
+        let worst = settled.iter().copied().max().unwrap();
+        assert!(
+            worst <= CAPACITY + PER_ROUND * 2,
+            "sustained load settled at {worst} entries against a capacity of {CAPACITY}; sizes: {sizes:?}"
+        );
+    }
+
+    #[test]
+    fn the_window_widens_again_when_the_load_drops() {
+        let ttl = Duration::from_millis(800);
+        let filter = DedupFilter::with_config(10, ttl);
+
+        // Overshoot once so the window narrows.
+        let mut key = [0u8; 32];
+        for seq in 0..200u64 {
+            key[..8].copy_from_slice(&seq.to_be_bytes());
+            filter.is_new(&key);
+        }
+        filter.cleanup();
+        let narrowed = filter.window_ms.load(Ordering::Relaxed);
+        assert!(narrowed < ttl.as_millis() as u64, "window must narrow");
+
+        // Let the burst age past the narrowed window so the map drops back
+        // under capacity, then idle: repeated sweeps must widen it again, or
+        // dedup depth never recovers after a burst.
+        thread::sleep(Duration::from_millis(narrowed + 50));
+        for _ in 0..80 {
+            filter.cleanup();
+        }
+        assert_eq!(
+            filter.window_ms.load(Ordering::Relaxed),
+            ttl.as_millis() as u64,
+            "window must return to the configured TTL once there is room"
+        );
+    }
+
+    #[test]
     fn test_cleanup_over_capacity_narrows_window() {
         // Over capacity, entries younger than the full TTL are still evicted:
         // the window shrinks in proportion to the overshoot. Before this the
@@ -227,6 +320,7 @@ mod tests {
             seen: DashMap::with_capacity_and_hasher(64, ahash::RandomState::default()),
             capacity: 5,
             ttl: Duration::from_millis(400),
+            window_ms: AtomicU64::new(Duration::from_millis(400).as_millis() as u64),
         };
 
         for i in 0u8..20 {
@@ -252,6 +346,7 @@ mod tests {
             seen: DashMap::with_capacity_and_hasher(64, ahash::RandomState::default()),
             capacity: 1000,
             ttl: Duration::from_secs(300),
+            window_ms: AtomicU64::new(Duration::from_secs(300).as_millis() as u64),
         };
 
         for i in 0u8..10 {
@@ -270,6 +365,7 @@ mod tests {
             seen: DashMap::with_capacity_and_hasher(4, ahash::RandomState::default()),
             capacity: 5,
             ttl: Duration::from_secs(300),
+            window_ms: AtomicU64::new(Duration::from_secs(300).as_millis() as u64),
         };
 
         for i in 0u8..5 {
@@ -324,6 +420,7 @@ mod tests {
         let filter = DedupFilter {
             seen: DashMap::with_capacity_and_hasher(100, ahash::RandomState::default()),
             capacity: DEFAULT_CAPACITY,
+            window_ms: AtomicU64::new(Duration::from_secs(DEFAULT_TTL_SECS).as_millis() as u64),
             ttl: Duration::from_millis(50),
         };
 
